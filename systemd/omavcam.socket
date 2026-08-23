@@ -1,0 +1,10 @@
+[Unit]
+Description=omavcam daemon socket
+
+[Socket]
+# %t is XDG_RUNTIME_DIR for a --user unit, which is where the CLI looks.
+ListenStream=%t/omavcam.sock
+SocketMode=0600
+
+[Install]
+WantedBy=sockets.target

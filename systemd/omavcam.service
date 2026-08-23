@@ -1,0 +1,11 @@
+[Unit]
+Description=omavcam daemon
+Requires=omavcam.socket
+After=omavcam.socket
+
+[Service]
+# Started by omavcam.socket, so no [Install]: connecting to the socket is what
+# brings it up. Being a systemd unit rather than an Omarchy `service` plugin
+# (a QML singleton) is what makes it survive omarchy-restart-shell.
+ExecStart=/usr/bin/omavcam daemon
+# Journald picks stderr up on its own.

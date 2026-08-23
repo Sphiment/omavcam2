@@ -42,18 +42,6 @@ pub struct State {
     pub capture: Option<Value>,
 }
 
-impl State {
-    /// What `omavcam status` prints.
-    pub fn render(&self) -> String {
-        format!(
-            "adb: {}\nphone: {}\ncapture: {}",
-            if self.adb_ok { "ok" } else { "unavailable" },
-            if self.phone.is_none() { "none" } else { "?" },
-            if self.capture.is_none() { "none" } else { "?" },
-        )
-    }
-}
-
 pub fn state_message(rev: u64, state: &State) -> String {
     json!({"type": "state", "v": VERSION, "rev": rev, "state": state}).to_string()
 }

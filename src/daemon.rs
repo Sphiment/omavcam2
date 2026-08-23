@@ -16,22 +16,27 @@ use crate::protocol::{
     error_message, ok_message, socket_path, state_message, State, MAX_MESSAGE, VERSION,
 };
 
-struct Inner {
+/// Everything one running daemon holds.
+struct Daemon {
     rev: u64,
     state: State,
     clients: HashMap<u64, Arc<Mutex<UnixStream>>>,
     next_client: u64,
 }
 
-type Shared = Arc<Mutex<Inner>>;
+type Shared = Arc<Mutex<Daemon>>;
 
-/// Replace the state, bump the revision, push the whole thing to everyone.
-/// Returns the new revision.
+/// Make this the state and push the whole thing to everyone. Returns the
+/// revision it is now at — unchanged if the state was already this, so the
+/// revision counts changes rather than requests.
 ///
 // ponytail: writes happen under the state lock, so one wedged client stalls
 // the daemon. A per-client queue thread if that ever bites.
 fn publish(shared: &Shared, state: State) -> u64 {
     let mut inner = shared.lock().unwrap();
+    if inner.state == state {
+        return inner.rev;
+    }
     inner.rev += 1;
     inner.state = state;
     let msg = state_message(inner.rev, &inner.state);
@@ -55,7 +60,7 @@ fn write_line(client: &Arc<Mutex<UnixStream>>, msg: &str) -> std::io::Result<()>
 }
 
 /// The daemon's only subprocess so far. Later tickets target every adb call
-/// with `-s <serial>`; `start-server` is the one that has no device to name.
+/// with `-s <serial>`; `start-server` is the one that has no phone to name.
 fn probe_adb() -> bool {
     matches!(Command::new("adb").arg("start-server").status(), Ok(s) if s.success())
 }
@@ -87,7 +92,7 @@ pub fn run() -> std::io::Result<()> {
     let dir = state_dir();
     fs::create_dir_all(&dir)?;
     let listener = listener()?;
-    let shared: Shared = Arc::new(Mutex::new(Inner {
+    let shared: Shared = Arc::new(Mutex::new(Daemon {
         rev: 1,
         state: State {
             adb_ok: probe_adb(),

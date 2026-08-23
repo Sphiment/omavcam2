@@ -6,6 +6,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -25,7 +26,47 @@ struct Fixture {
 }
 
 impl Fixture {
+    /// A daemon already running, which is what systemd leaves behind once
+    /// something has connected. Most tests want this.
     fn start() -> Fixture {
+        let mut fixture = Fixture::new();
+        fixture.spawn();
+        fixture
+    }
+
+    /// Nothing running, and the daemon handed to `systemd-socket-activate` —
+    /// a socket unit minus the unit file. It binds the socket, and on the
+    /// first connection execs the daemon with the listener on fd 3.
+    fn activated() -> Fixture {
+        let mut fixture = Fixture::new();
+        // systemd-socket-activate hands the child a curated environment — PATH
+        // survives, anything of ours does not — so the daemon's own variables
+        // have to go through --setenv.
+        fixture.daemon = Some(
+            fixture
+                .daemon_command("systemd-socket-activate")
+                .args(["-l", fixture.socket.to_str().unwrap()])
+                .args([
+                    format!(
+                        "--setenv=OMAVCAM_STATE_DIR={}",
+                        fixture.dir.join("state").display()
+                    ),
+                    format!("--setenv=OMAVCAM_STUB_LOG={}", fixture.log.display()),
+                    format!("--setenv=OMAVCAM_STUB_DIR={}", fixture.stub_dir.display()),
+                ])
+                .args([env!("CARGO_BIN_EXE_omavcam"), "daemon"])
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + TIMEOUT;
+        while !fixture.socket.exists() {
+            assert!(Instant::now() < deadline, "socket never appeared");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        fixture
+    }
+
+    fn new() -> Fixture {
         static N: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
             "omavcam-test-{}-{}",
@@ -43,7 +84,7 @@ impl Fixture {
             fs::copy(&stub, bin_dir.join(tool)).unwrap();
         }
 
-        let mut fixture = Fixture {
+        let fixture = Fixture {
             socket: dir.join("omavcam.sock"),
             log: dir.join("argv.log"),
             stub_dir,
@@ -52,27 +93,14 @@ impl Fixture {
             dir,
         };
         fs::write(&fixture.log, "").unwrap();
-        fixture.spawn();
         fixture
     }
 
     /// Start the daemon the way the socket unit would, minus systemd.
     fn spawn(&mut self) {
-        let path = format!(
-            "{}:{}",
-            self.bin_dir.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
         self.daemon = Some(
-            Command::new(env!("CARGO_BIN_EXE_omavcam"))
+            self.daemon_command(env!("CARGO_BIN_EXE_omavcam"))
                 .arg("daemon")
-                .env("PATH", path)
-                .env("OMAVCAM_SOCKET", &self.socket)
-                .env("OMAVCAM_STATE_DIR", self.dir.join("state"))
-                .env("OMAVCAM_STUB_LOG", &self.log)
-                .env("OMAVCAM_STUB_DIR", &self.stub_dir)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
                 .spawn()
                 .unwrap(),
         );
@@ -84,6 +112,31 @@ impl Fixture {
         }
     }
 
+    /// The daemon's environment: the stubs ahead of the real tools, a temp
+    /// state dir, and its own process group so the whole thing can be killed
+    /// even when something else exec'd it.
+    fn daemon_command(&self, program: &str) -> Command {
+        let mut command = Command::new(program);
+        command
+            .env("PATH", self.path())
+            .env("OMAVCAM_SOCKET", &self.socket)
+            .env("OMAVCAM_STATE_DIR", self.dir.join("state"))
+            .env("OMAVCAM_STUB_LOG", &self.log)
+            .env("OMAVCAM_STUB_DIR", &self.stub_dir)
+            .process_group(0)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    fn path(&self) -> String {
+        format!(
+            "{}:{}",
+            self.bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        )
+    }
+
     fn restart(&mut self) {
         self.stop();
         self.spawn();
@@ -91,6 +144,11 @@ impl Fixture {
 
     fn stop(&mut self) {
         if let Some(mut daemon) = self.daemon.take() {
+            // Under activation the daemon is a grandchild, so take the group.
+            let _ = Command::new("kill")
+                .arg("--")
+                .arg(format!("-{}", daemon.id()))
+                .status();
             let _ = daemon.kill();
             let _ = daemon.wait();
         }
@@ -108,14 +166,9 @@ impl Fixture {
     }
 
     fn cli(&self, args: &[&str]) -> Output {
-        let path = format!(
-            "{}:{}",
-            self.bin_dir.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
         Command::new(env!("CARGO_BIN_EXE_omavcam"))
             .args(args)
-            .env("PATH", path)
+            .env("PATH", self.path())
             .env("OMAVCAM_SOCKET", &self.socket)
             .output()
             .unwrap()
@@ -204,6 +257,25 @@ fn status_prints_the_state_and_exits_zero() {
 }
 
 #[test]
+fn status_starts_the_daemon_on_demand_via_socket_activation() {
+    let f = Fixture::activated();
+    // Nothing is running yet: the socket exists, the daemon does not.
+    let out = f.cli(&["status"]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+
+    assert!(
+        out.status.success(),
+        "status failed: {stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("phone: none"), "{stdout}");
+    assert!(
+        f.argv().iter().any(|line| line == "adb start-server"),
+        "the activated daemon ran its startup probe, so it really started"
+    );
+}
+
+#[test]
 fn the_harness_records_argv() {
     let f = Fixture::start();
     let mut client = f.connect();
@@ -235,11 +307,14 @@ fn every_client_is_pushed_the_whole_state_when_it_changes() {
     let mut actor = f.connect();
     let before = watcher.recv_state();
     actor.recv_state();
+    assert_eq!(before["state"]["adb_ok"], json!(true));
 
+    f.script_exit("adb", 1); // the world changes under the daemon
     actor.request("refresh");
 
     // The watcher asked for nothing and polls nothing, yet gets the new state.
     let after = watcher.recv_state();
+    assert_eq!(after["state"]["adb_ok"], json!(false));
     assert!(
         after["rev"].as_u64().unwrap() > before["rev"].as_u64().unwrap(),
         "revision must increase: {before} then {after}"
@@ -254,13 +329,29 @@ fn a_response_names_the_revision_that_reflects_it() {
     let mut client = f.connect();
     let initial = client.recv_state();
 
+    f.script_exit("adb", 1);
     let response = client.request("refresh");
-    assert_eq!(response["ok"], json!(true));
 
     // The state carrying the request's effect is already in hand by the time
     // the response names its revision, so nothing has to be asked for twice.
     assert_eq!(response["rev"], client.last_state["rev"]);
     assert!(response["rev"].as_u64().unwrap() > initial["rev"].as_u64().unwrap());
+    assert_eq!(client.last_state["state"]["adb_ok"], json!(false));
+}
+
+#[test]
+fn a_request_that_changes_nothing_does_not_burn_a_revision() {
+    let f = Fixture::start();
+    let mut client = f.connect();
+    let initial = client.recv_state();
+
+    let response = client.request("refresh");
+
+    assert_eq!(response["ok"], json!(true));
+    assert_eq!(
+        response["rev"], initial["rev"],
+        "the revision counts changes, not requests"
+    );
 }
 
 #[test]

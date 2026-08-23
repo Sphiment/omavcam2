@@ -4,10 +4,17 @@ mod protocol;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
 use protocol::{socket_path, State, VERSION};
+
+/// Long enough that a busy daemon is never cut off, short enough that a broken
+/// one leaves a message rather than a hung terminal. Under socket activation
+/// `connect()` succeeds whether or not the daemon can actually start, so this
+/// is the timeout that catches a daemon failing to come up.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {
@@ -35,18 +42,19 @@ fn request(kind: &str) -> ExitCode {
     let (state, response) = match call(kind) {
         Ok(pair) => pair,
         Err(e) => {
-            // The socket unit is what makes the daemon appear on demand, so a
-            // missing socket is an installation problem, not a running one.
+            // The socket unit is what makes the daemon appear on demand, so
+            // both a missing socket and a daemon that will not start are
+            // installation problems, not "the daemon isn't running".
             eprintln!(
-                "omavcam: cannot reach {}: {e}\n\
-                 the daemon is socket-activated; try: systemctl --user enable --now omavcam.socket",
+                "omavcam: no reply from {}: {e}\n\
+                 the daemon is socket-activated; check: systemctl --user status omavcam.socket omavcam.service",
                 socket_path().display()
             );
             return ExitCode::from(2);
         }
     };
 
-    println!("{}", state.render());
+    println!("{}", render(&state));
     if response["ok"] == Value::Bool(true) {
         return ExitCode::SUCCESS;
     }
@@ -58,11 +66,26 @@ fn request(kind: &str) -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// What `omavcam status` prints.
+fn render(state: &State) -> String {
+    let field = |v: &Option<Value>| match v {
+        None => "none".to_string(),
+        Some(v) => v.to_string(),
+    };
+    format!(
+        "adb: {}\nphone: {}\ncapture: {}",
+        if state.adb_ok { "ok" } else { "unavailable" },
+        field(&state.phone),
+        field(&state.capture),
+    )
+}
+
 /// Returns the state at or after the revision the response names, so what we
 /// print is the state that reflects the request rather than whatever arrived
 /// first.
 fn call(kind: &str) -> std::io::Result<(State, Value)> {
     let stream = UnixStream::connect(socket_path())?;
+    stream.set_read_timeout(Some(REPLY_TIMEOUT))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let id = "1";
     writeln!(&stream, "{}", json!({"v": VERSION, "id": id, "kind": kind}))?;

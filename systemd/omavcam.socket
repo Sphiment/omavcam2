@@ -1,5 +1,9 @@
 [Unit]
 Description=omavcam daemon socket
+# Packaging installs these (#16). Until then, by hand:
+#   cp systemd/omavcam.{socket,service} ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now omavcam.socket
 
 [Socket]
 # %t is XDG_RUNTIME_DIR for a --user unit, which is where the CLI looks.

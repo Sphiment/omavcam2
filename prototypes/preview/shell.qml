@@ -21,7 +21,7 @@
 // Dragging is still the compositor's job — Super+drag moves it like any other
 // window, and snapping is nine named positions you jump to.
 //
-// Keys: 1-9 anchor (reading order, 1 = top-left) · +/- size · esc quit
+// Drive it over IPC (see the IpcHandler below) — there is no window of ours.
 import Quickshell
 import Quickshell.Io
 import Quickshell.Hyprland
@@ -64,16 +64,20 @@ ShellRoot {
 
   // Omarchy wraps Hyprland in Lua, so window rules go through `eval`, not
   // `keyword`. Applied before scrcpy's window maps, so it never flashes tiled.
+  //
+  // The theme has to come from RULES here, not from QML. When we drew the
+  // preview ourselves we painted our own corners and border; scrcpy's window is
+  // foreign, so the compositor is the only thing that can round or frame it.
+  // `border_size = 0` was carried over from the QML version and is exactly why
+  // the theming looked missing.
   Process {
     running: true
     command: ["bash", "-c",
       "hyprctl eval 'o.window({ title = \"^(omavcam preview)$\" }, " +
-      "{ float = true, pin = true, no_dim = true, border_size = 0, " +
-      "opacity = \"1 1\", tag = \"-default-opacity\" })' >/dev/null; " +
-      // The control strip is only a prototype harness, but it must float or it
-      // tiles into the user's layout and shoves their windows around.
-      "hyprctl eval 'o.window({ title = \"^(omavcam control)$\" }, " +
-      "{ float = true, pin = true })' >/dev/null"]
+      "{ float = true, pin = true, no_dim = true, " +
+      "rounding = " + Style.cornerRadius + ", " +
+      "border_size = " + Style.normalBorderWidth + ", " +
+      "opacity = \"1 1\", tag = \"-default-opacity\" })' >/dev/null"]
   }
 
   // scrcpy's window is a foreign toplevel, so unlike a window we own we have to
@@ -94,56 +98,31 @@ ShellRoot {
       onStreamFinished: {
         if (parseInt(text.trim()) > 0 && !root.capturing) {
           root.capturing = true
+          // Size first, then anchor: scrcpy opens at its own --window-width,
+          // which matches no preset, so the first resize would otherwise jump.
+          root.pendingSize = true
           root.snap(0)
         }
       }
     }
   }
 
-  // A control strip, not a preview. The keys have to live in a window we own —
-  // scrcpy's window is not ours to put a FocusScope in.
-  FloatingWindow {
-    id: win
-    title: "omavcam control"
-    color: Color.background
-    implicitWidth: 340
-    implicitHeight: 92
-
-    FocusScope {
-      id: keys
-      anchors.fill: parent
-      focus: true
-      Component.onCompleted: forceActiveFocus()
-      Keys.onPressed: (e) => {
-        if (e.key >= Qt.Key_1 && e.key <= Qt.Key_9) root.snap(e.key - Qt.Key_1)
-        else if (e.key === Qt.Key_Equal || e.key === Qt.Key_Plus) root.resize(1)
-        else if (e.key === Qt.Key_Minus) root.resize(-1)
-        else if (e.key === Qt.Key_Escape) { capture.running = false; Qt.quit() }
-      }
-    }
-
-    MouseArea { anchors.fill: parent; onClicked: keys.forceActiveFocus() }
-
-    Column {
-      anchors.centerIn: parent
-      spacing: 4
-      Text {
-        color: Color.foreground
-        font.family: Style.font.family
-        font.pixelSize: 13
-        text: root.capturing ? "preview: scrcpy window  ·  cam: " + root.node
-                             : "starting scrcpy…"
-      }
-      Text {
-        color: Color.foreground
-        font.family: Style.font.family
-        font.pixelSize: 11
-        opacity: 0.7
-        text: root.sizes[root.sizeIndex] + "  ·  "
-              + (keys.activeFocus ? "1-9 anchor · +/- size · esc quit"
-                                  : "click here first — no focus")
-      }
-    }
+  // No window of our own. The old version needed one because it WAS the
+  // preview; this one only issues commands, so a second window would be pure
+  // clutter next to the thing you actually want to look at.
+  //
+  // Commands come in over IPC instead, which is also the shape the real plugin
+  // has — a keybinding or the panel sends a request, it does not type into a
+  // preview:
+  //
+  //   qs -p prototypes/preview ipc call preview anchor 3
+  //   qs -p prototypes/preview ipc call preview size up
+  //   qs -p prototypes/preview ipc call preview quit
+  IpcHandler {
+    target: "preview"
+    function anchor(i: int): void { root.snap(Math.max(0, Math.min(8, i - 1))) }
+    function size(dir: string): void { root.resize(dir === "down" ? -1 : 1) }
+    function quit(): void { capture.running = false; Qt.quit() }
   }
 
   function previewSize() {

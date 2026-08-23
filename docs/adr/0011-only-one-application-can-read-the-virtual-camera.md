@@ -91,14 +91,52 @@ What caught it was checking `fuser /dev/video0` *during* each run and rejecting
 the result if the webcam had been touched. Any future test in this area must do
 the same; a green result without an attribution check means nothing here.
 
-## Status
+## Decided: the daemon fans out to a second node
 
-**Undecided, and the PipeWire option is now the weakest of the three.** It
-cannot be relied on without first explaining and fixing why PipeWire cannot open
-a loopback node that a plain `ffmpeg` reader opens without complaint.
+The PipeWire option is **closed**, not merely weak — ADR-0012 explains why. It
+only ever saw omavcam under `exclusive_caps=0`, which is the setting that makes
+browsers hide the camera and makes readers fail at `STREAMON`. No configuration
+satisfies both.
 
-That leaves feeding the preview outside V4L2 — the daemon already holds the
-frames whenever it is relaying — as the option that survives every case.
+That leaves the fan-out: scrcpy writes to a private node, the daemon reads it
+once, and writes to the public camera and to a preview node. Each node then has
+exactly one writer and one reader, which is the arrangement that has worked all
+along.
 
-It gates ADR-0002 and ADR-0003 and should be settled before the preview is
-built.
+### What it costs
+
+Measured on hardware at 720p30, `ours` being scrcpy plus the relay:
+
+| Configuration | omavcam | consumers |
+|---|---|---|
+| direct, no relay | 18.2–23.1% | 0.5% |
+| relay → 1 node | 19.8–20.8% | 0.6% |
+| relay → 2 nodes | 24.5–32.2% | 1.6% |
+| relay → 3 nodes | 42.7–43.9% | 2.4% |
+
+**Inserting the relay is free.** With one output it is indistinguishable from
+writing directly — run-to-run noise is about ±5 points and the difference is
+smaller than that.
+
+**Each additional node costs roughly 10 points**, and that is not decoding, it
+is copying. A 1280x720 YUV420 frame is 1.38 MB, so every node carries 41 MB/s
+plus per-frame ioctls.
+
+The product needs **two** outputs at most — Studio replaces the floating preview
+rather than joining it — so the cost is about **+10 to 14 points while the
+preview is visible**, and nothing when it is not. Under half a core, paid only
+while looking at it.
+
+ffmpeg converts format per output; a Rust relay writing one shared buffer should
+do better. The kernel copy is the floor.
+
+## Consequences
+
+The daemon becomes the writer of the public camera, and scrcpy becomes an
+internal detail feeding it. That is the same shape as OBS's virtual camera, and
+it is more consistent with ADR-0001 than the current arrangement, where scrcpy
+writing directly is the one part of the system the daemon does not own.
+
+Per ADR-0012 the internal nodes cannot be hidden: while the fan-out is live they
+appear in every application's camera list. Name them so that is not confusing,
+and only write to them while they are actually in use.

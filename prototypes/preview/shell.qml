@@ -3,24 +3,29 @@
 // This exists to prove the ADRs, not to be the implementation. It was written
 // to be run and thrown away: it talks to hyprctl and scrcpy directly instead of
 // through the daemon, hardcodes the things the daemon owns, handles no errors,
-// and persists nothing. Read it for the SHAPE and for the three workarounds in
-// ADR-0006. Then write the real one properly. See prototypes/README.md for the
-// specific things that must not survive.
+// and persists nothing. Read it for the SHAPE. Then write the real one
+// properly. See prototypes/README.md for the specific things that must not
+// survive.
 //
-// What it demonstrates: the preview as a real window, with anchor snapping and
-// no drag implementation at all.
+// What it demonstrates (ADR-0013): the preview is SCRCPY'S OWN WINDOW. One
+// scrcpy process decodes once, draws that window, and writes the virtual
+// camera — so the preview and a video call can be live at the same time, which
+// is impossible when both must READ the node (ADR-0011: one streaming client
+// per V4L2 device, real webcams included).
 //
-// Dragging is the compositor's job — Super+drag moves this like any other
-// window. Snapping is nine named positions you jump to. Dropping drag-snapping
-// deletes the cursor polling, the position tracking, the drag-end guessing and
-// the nearest-anchor search, because a chosen anchor needs none of them.
+// Nothing here renders video. This shell only launches scrcpy, applies window
+// rules to the window it opens, and moves it. Measured 24.0% CPU against
+// 18-23% for scrcpy with no window at all — the drawing is OpenGL and close to
+// free, where fanning out to a second node cost 32.2%.
+//
+// Dragging is still the compositor's job — Super+drag moves it like any other
+// window, and snapping is nine named positions you jump to.
 //
 // Keys: 1-9 anchor (reading order, 1 = top-left) · +/- size · esc quit
 import Quickshell
 import Quickshell.Io
 import Quickshell.Hyprland
 import QtQuick
-import QtMultimedia
 import qs.Ui
 import qs.Commons
 
@@ -31,47 +36,79 @@ ShellRoot {
   readonly property string winTitle: "omavcam preview"
   readonly property var sizes: ["small", "medium", "large", "original"]
 
-  property int sizeIndex: 0
-  property bool bound: false
-  property real nativeW: 1280
-  property real nativeH: 720
+  property int sizeIndex: 1
+  property bool capturing: false
+  // The capture's real size. Hardcoded because the daemon owns it; the shape to
+  // copy is that the preview's aspect follows the capture, not the other way.
+  readonly property real nativeW: 1280
+  readonly property real nativeH: 720
   property var monitor: null
+  property int pendingAnchor: -1
+  property bool pendingSize: false
 
-  FloatingWindow {
-    id: win
-    title: root.winTitle
-    color: Color.background
-    implicitWidth: root.previewSize().width
-    implicitHeight: root.previewSize().height
+  // --no-control matters: without it the window forwards every click and
+  // keystroke to the phone. --window-title is what the rules and moves match on.
+  Process {
+    id: capture
+    running: true
+    command: ["scrcpy",
+      "--video-source=camera", "--camera-id=0",
+      "--camera-size=" + Math.round(root.nativeW) + "x" + Math.round(root.nativeH),
+      "--camera-fps=30",
+      "--v4l2-sink=" + root.node,
+      "--no-audio", "--no-control",
+      "--window-title=" + root.winTitle,
+      "--window-width=640", "--window-height=360"]
+    onExited: root.capturing = false
+  }
 
-    MediaDevices { id: devices }
-    Camera { id: cam }
-    CaptureSession { camera: cam; videoOutput: out }
-    VideoOutput { id: out; anchors.fill: parent; fillMode: VideoOutput.PreserveAspectFit }
+  // Omarchy wraps Hyprland in Lua, so window rules go through `eval`, not
+  // `keyword`. Applied before scrcpy's window maps, so it never flashes tiled.
+  Process {
+    running: true
+    command: ["bash", "-c",
+      "hyprctl eval 'o.window({ title = \"^(omavcam preview)$\" }, " +
+      "{ float = true, pin = true, no_dim = true, border_size = 0, " +
+      "opacity = \"1 1\", tag = \"-default-opacity\" })' >/dev/null; " +
+      // The control strip is only a prototype harness, but it must float or it
+      // tiles into the user's layout and shoves their windows around.
+      "hyprctl eval 'o.window({ title = \"^(omavcam control)$\" }, " +
+      "{ float = true, pin = true })' >/dev/null"]
+  }
 
-    // Only listens until the stream's real size is known, then stops — there is
-    // no per-frame work in the steady state.
-    Connections {
-      target: out.videoSink
-      enabled: root.bound && root.nativeW === 1280 && root.nativeH === 720
-      function onVideoFrameChanged() {
-        const f = out.videoSink.videoFrame
-        if (f && f.width > 0) { root.nativeW = f.width; root.nativeH = f.height }
+  // scrcpy's window is a foreign toplevel, so unlike a window we own we have to
+  // wait for it to appear before it can be placed. This is the cost ADR-0002
+  // paid for mpv, and it is back — but it buys the free preview, and it is one
+  // poll at startup rather than anything per frame.
+  Timer {
+    interval: 500
+    running: !root.capturing
+    repeat: true
+    onTriggered: probe.running = true
+  }
+
+  Process {
+    id: probe
+    command: ["bash", "-c", "hyprctl clients -j | grep -c '\"omavcam preview\"' || true"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        if (parseInt(text.trim()) > 0 && !root.capturing) {
+          root.capturing = true
+          root.snap(0)
+        }
       }
     }
+  }
 
-    Text {
-      anchors.centerIn: parent
-      visible: !root.bound
-      color: Color.foreground
-      font.family: Style.font.family
-      font.pixelSize: 13
-      horizontalAlignment: Text.AlignHCenter
-      text: "waiting for " + root.node + "\nrun:  ./phone start"
-    }
+  // A control strip, not a preview. The keys have to live in a window we own —
+  // scrcpy's window is not ours to put a FocusScope in.
+  FloatingWindow {
+    id: win
+    title: "omavcam control"
+    color: Color.background
+    implicitWidth: 340
+    implicitHeight: 92
 
-    // focus: true alone only sets focus within the scope — the item has to be
-    // given active focus once the window exists, or key events go nowhere.
     FocusScope {
       id: keys
       anchors.fill: parent
@@ -79,34 +116,32 @@ ShellRoot {
       Component.onCompleted: forceActiveFocus()
       Keys.onPressed: (e) => {
         if (e.key >= Qt.Key_1 && e.key <= Qt.Key_9) root.snap(e.key - Qt.Key_1)
-        else if (e.key === Qt.Key_Equal || e.key === Qt.Key_Plus)
-          root.sizeIndex = Math.min(root.sizes.length - 1, root.sizeIndex + 1)
-        else if (e.key === Qt.Key_Minus)
-          root.sizeIndex = Math.max(0, root.sizeIndex - 1)
-        else if (e.key === Qt.Key_Escape) Qt.quit()
+        else if (e.key === Qt.Key_Equal || e.key === Qt.Key_Plus) root.resize(1)
+        else if (e.key === Qt.Key_Minus) root.resize(-1)
+        else if (e.key === Qt.Key_Escape) { capture.running = false; Qt.quit() }
       }
     }
 
-    // Click to take focus back, and show whether it has it — with no border
-    // there is otherwise no way to tell why the keys are dead.
-    MouseArea {
-      anchors.fill: parent
-      onClicked: keys.forceActiveFocus()
-    }
+    MouseArea { anchors.fill: parent; onClicked: keys.forceActiveFocus() }
 
-    Rectangle {
-      anchors { left: parent.left; bottom: parent.bottom; margins: 4 }
-      width: hint.width + 12; height: hint.height + 8
-      color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.85)
-      radius: Style.cornerRadius
+    Column {
+      anchors.centerIn: parent
+      spacing: 4
       Text {
-        id: hint
-        anchors.centerIn: parent
+        color: Color.foreground
+        font.family: Style.font.family
+        font.pixelSize: 13
+        text: root.capturing ? "preview: scrcpy window  ·  cam: " + root.node
+                             : "starting scrcpy…"
+      }
+      Text {
         color: Color.foreground
         font.family: Style.font.family
         font.pixelSize: 11
+        opacity: 0.7
         text: root.sizes[root.sizeIndex] + "  ·  "
-              + (keys.activeFocus ? "1-9 to anchor" : "click first — no focus")
+              + (keys.activeFocus ? "1-9 anchor · +/- size · esc quit"
+                                  : "click here first — no focus")
       }
     }
   }
@@ -120,46 +155,29 @@ ShellRoot {
     return Qt.size(Math.round(h * ar), h)
   }
 
-  // videoInputs[].id is a QByteArray; `===` against a string literal is
-  // silently false and the session falls back to the laptop webcam.
-  function bind() {
-    for (let i = 0; i < devices.videoInputs.length; i++) {
-      if (String(devices.videoInputs[i].id) === node) {
-        cam.cameraDevice = devices.videoInputs[i]
-        cam.active = true
-        bound = true
-        return
-      }
-    }
+  function snap(i) { pendingAnchor = i; geom.running = true }
+  function resize(d) {
+    sizeIndex = Math.max(0, Math.min(sizes.length - 1, sizeIndex + d))
+    pendingSize = true
+    geom.running = true
   }
 
-  // The node only enumerates while something writes to it, so this retries —
-  // but only while unbound. Nothing polls once the stream is up.
-  Timer {
-    interval: 1000
-    running: !root.bound
-    repeat: true
-    onTriggered: root.bind()
-  }
-
-  // Anchoring targets the focused monitor, so we never need to know where the
-  // window currently is — which is what let all the position tracking go.
-  property int pendingAnchor: -1
-  function snap(i) {
-    pendingAnchor = i
-    if (!monitors.running) monitors.running = true
-  }
-
+  // One read for both the monitor and scrcpy's current size. We cannot ask the
+  // window how big it is the way we could when we owned it, so it is read back
+  // from the compositor — on user actions only, never per frame.
   Process {
-    id: monitors
-    command: ["hyprctl", "monitors", "-j"]
+    id: geom
+    command: ["bash", "-c", "hyprctl monitors -j; echo '@@'; hyprctl clients -j"]
     stdout: StdioCollector {
       onStreamFinished: {
-        let m = null
+        const parts = text.split("@@")
+        if (parts.length < 2) return
+        let m = null, w = null
         try {
-          for (const d of JSON.parse(text)) if (d.focused) m = d
+          for (const d of JSON.parse(parts[0])) if (d.focused) m = d
+          for (const c of JSON.parse(parts[1])) if (c.title === root.winTitle) w = c
         } catch (e) { return }
-        if (!m) return
+        if (!m || !w) return
 
         // hyprctl reports position and reserved in logical pixels but size in
         // physical ones, so the scale has to be divided out.
@@ -169,6 +187,16 @@ ShellRoot {
           w: m.width / m.scale - r[0] - r[2],
           h: m.height / m.scale - r[1] - r[3]
         }
+
+        // Sizing is `resize` with x/y meaning WIDTH and HEIGHT — the parameter
+        // names lie, and `exact` is what stops them being read as a delta.
+        if (root.pendingSize) {
+          root.pendingSize = false
+          const s = root.previewSize()
+          Hyprland.dispatch('hl.dsp.window.resize({ window = "title:^(' + root.winTitle
+                            + ')$", x = ' + s.width + ', y = ' + s.height + ', exact = true })')
+          if (root.pendingAnchor < 0) { geom.running = true; return }
+        }
         if (root.pendingAnchor < 0) return
 
         const i = root.pendingAnchor
@@ -177,27 +205,14 @@ ShellRoot {
         const u = root.monitor
         const col = i % 3, row = Math.floor(i / 3)
         const x = col === 0 ? u.x + g
-                : col === 1 ? u.x + (u.w - win.width) / 2
-                : u.x + u.w - win.width - g
+                : col === 1 ? u.x + (u.w - w.size[0]) / 2
+                : u.x + u.w - w.size[0] - g
         const y = row === 0 ? u.y + g
-                : row === 1 ? u.y + (u.h - win.height) / 2
-                : u.y + u.h - win.height - g
+                : row === 1 ? u.y + (u.h - w.size[1]) / 2
+                : u.y + u.h - w.size[1] - g
         Hyprland.dispatch('hl.dsp.window.move({ window = "title:^(' + root.winTitle
                           + ')$", x = ' + Math.round(x) + ', y = ' + Math.round(y) + ' })')
       }
     }
   }
-
-  // Omarchy wraps Hyprland in Lua, so window rules go through `eval`, not
-  // `keyword`. Runs once; the monitor read that follows seeds the size presets.
-  Process {
-    running: true
-    command: ["bash", "-c",
-      "hyprctl eval 'o.window({ title = \"^(omavcam preview)$\" }, " +
-      "{ float = true, pin = true, no_dim = true, border_size = 0, " +
-      "opacity = \"1 1\", tag = \"-default-opacity\" })' >/dev/null"]
-    onExited: root.snap(0)
-  }
-
-  Component.onCompleted: bind()
 }

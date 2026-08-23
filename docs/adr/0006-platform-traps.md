@@ -46,6 +46,24 @@ It also advertises exactly one format, fixed by the writer, so no reader can
 request a smaller capture. `--camera-size` on the phone is the only downscale
 lever, and it is worth roughly 4x the CPU of the entire pipeline.
 
+## scrcpy's camera flags exclude each other
+
+From upstream's camera documentation:
+
+> If `--camera-size` is specified, then `-m`/`--max-size` and `--camera-ar` are
+> forbidden (the size is determined by the value given explicitly).
+
+> If `--camera-id` is specified, then `--camera-facing` is forbidden (the id
+> already determines the camera).
+
+So resolution and aspect ratio are not two independent settings that both become
+flags. Aspect ratio **filters the resolutions on offer**; the launch always
+passes an explicit size. A settings model with both as free fields produces
+invocations scrcpy refuses.
+
+Note also that `--max-size` means different things per source: for display
+mirroring it is applied *after* cropping, for camera it is applied *first*.
+
 ## Hyprland emits no geometry events
 
 Subscribing to `.socket2.sock` while moving and resizing windows produces

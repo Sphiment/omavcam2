@@ -19,8 +19,9 @@ share almost no settings.
 _Avoid_: input, mode
 
 **Lens**:
-One of the phone's physical cameras, identified by the id adb reports. A phone
-has several, each with its own resolutions and zoom range.
+One of the phone's physical cameras, identified by the id
+`scrcpy --list-cameras` reports. A phone has several, each with its own
+resolutions and zoom range.
 _Avoid_: camera (ambiguous with the phone as a whole), facing
 
 **Virtual camera**:

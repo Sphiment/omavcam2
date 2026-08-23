@@ -21,9 +21,16 @@ on the author's preference.
 
 ## Consequences
 
-The daemon is socket-activated by systemd rather than always running, so it
-costs nothing when no phone is attached and there is no "daemon isn't running"
-error state: connecting starts it.
+The daemon is socket-activated by systemd rather than always running, so there
+is no "daemon isn't running" error state: connecting starts it.
+
+**It does not follow that it costs nothing while idle.** The bar widget is part
+of the shell and is therefore always running, so if it holds a socket connection
+to show status, the daemon is up whenever the desktop is — socket activation
+buys the absent error state, not idleness. What it does keep is the case where
+the shell is not running at all: a CLI-only or headless invocation starts the
+daemon and it exits again. Any real idleness beyond that has to be designed for
+deliberately, not assumed from the activation model.
 
 It must survive the shell dying. Omarchy has a `service` plugin kind, but those
 are QML singletons that die with the shell, and `omarchy-restart-shell` is

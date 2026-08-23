@@ -1,0 +1,9 @@
+# Local editor and agent settings.
+.claude/
+
+# Symlinks that let the prototype resolve `qs.Ui` and `qs.Commons` when run
+# standalone. They must never be committed: `omarchy-plugin-validate` refuses
+# any symlink inside a plugin folder. Recreate them with the commands in
+# prototypes/README.md.
+prototypes/preview/Ui
+prototypes/preview/Commons

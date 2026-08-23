@@ -11,11 +11,11 @@ them. See [CONTEXT.md](CONTEXT.md) for the vocabulary and
 
 ## Status
 
-Early. What exists today is the walking skeleton: the daemon, the socket
-protocol, and the test harness everything else is built on.
+Early. What exists today is the daemon, the socket protocol, the test harness
+everything else is built on, and wired connection: plug a phone in over USB and
+`omavcam status` names it.
 
-`omavcam status` starts the daemon and prints its state. There is no phone
-handling and no capture yet — those are the next tickets.
+There is no capture yet, and no wireless — those are the next tickets.
 
 ## Requirements
 
@@ -56,13 +56,37 @@ Omarchy `service` plugin, and those are QML singletons that die with the shell
 ## Use
 
 ```sh
-omavcam status     # print the daemon's state
-omavcam refresh    # re-check the tools the daemon depends on
-omavcam daemon     # run the daemon in the foreground (systemd's job, normally)
+omavcam status            # print the daemon's state
+omavcam select <serial>   # choose which attached phone to use (bare: lists them)
+omavcam refresh           # re-check adb and the attached phones now
+omavcam daemon            # run the daemon in the foreground (systemd's job, normally)
 ```
 
 Exit codes: `0` the request succeeded, `1` the daemon refused it and said why on
 stderr, `2` the daemon could not be reached at all.
+
+## Which phone
+
+The daemon asks `adb devices -l` once a second, so plugging a phone in or
+unplugging it is noticed without anyone running a command.
+
+One phone attached is selected automatically. Several and omavcam asks, because
+the second phone on a desk is usually one that is charging — and it shows up as
+`unauthorized`, so anything taking the first entry from `adb devices` points the
+webcam at a phone in someone's pocket. The choice is remembered in
+`~/.local/state/omavcam/phones.json` and re-made for you whenever that phone is
+attached. When it is *not* attached, omavcam reports no phone rather than
+switching to whatever else is plugged in: a webcam should not change rooms
+without being asked. That holds even when the other phone is the only one on
+the desk, so a phone you have never used before is one `omavcam select` away —
+run it bare and it lists what is attached.
+
+Every `adb` call that addresses a phone names it with `-s <serial>`. The only
+two that do not are `start-server` and `devices`, which have no phone to name.
+A test asserts this over the recorded argv, because an untargeted command is
+correct right up until a second phone is plugged in.
+
+See [ADR-0007](docs/adr/0007-connection-is-a-phase-not-a-precondition.md).
 
 Logs go to the journal:
 
@@ -98,19 +122,21 @@ test scripted for it. The stub directory *is* the fake — there is no
 process-runner abstraction inside the daemon to swap out, so the tests exercise
 the same code that runs in production.
 
-That harness is in [`tests/skeleton.rs`](tests/skeleton.rs) and the stub itself
-is [`tests/stub`](tests/stub). One test drives real socket activation through
-`systemd-socket-activate`, so the activation path is covered without installing
-anything.
+That harness is in [`tests/common/mod.rs`](tests/common/mod.rs) and the stub
+itself is [`tests/stub`](tests/stub). One test drives real socket activation
+through `systemd-socket-activate`, so the activation path is covered without
+installing anything.
 
 ## Layout
 
 ```
 src/protocol.rs   the wire format, shared by the daemon and the CLI
 src/daemon.rs     the daemon: state, clients, pushing
+src/phones.rs     what adb sees, which phone is selected, what that means
 src/main.rs       the CLI, and the entry point for both
 systemd/          the socket and service units
-tests/            the harness
+tests/common/     the harness every test file is built on
+tests/            the tests, and the stub adb/scrcpy/modprobe
 CONTEXT.md        the vocabulary; use these words, avoid the listed synonyms
 docs/adr/         why things are the way they are
 docs/agents/      how agents should work in this repo

@@ -66,6 +66,12 @@ How the connection is carried — `wired` over USB, or `wireless` over TCP after
 pairing.
 _Avoid_: connection type, method
 
+**Registry**:
+The one file omavcam remembers phones in between runs: which one is selected,
+and later the phones pairing knows about. One registry, not two — a phone is
+known in exactly one place whatever transport it arrived over.
+_Avoid_: store, database, config, known devices
+
 **Pairing**:
 The one-time exchange of a six-digit code that authorises wireless debugging.
 Distinct from connecting, which happens every time and can fail on its own.

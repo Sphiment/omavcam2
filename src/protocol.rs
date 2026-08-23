@@ -12,6 +12,7 @@
 //!
 //! ```text
 //! {"v":1,"id":"7","kind":"status"}
+//! {"v":1,"id":"8","kind":"select","serial":"39281FDJH0031T"}
 //! ```
 //!
 //! The daemon pushes the *whole* state, unprompted, to every connected client
@@ -36,10 +37,45 @@ pub const MAX_MESSAGE: usize = 64 * 1024;
 pub struct State {
     /// Whether `adb start-server` last succeeded.
     pub adb_ok: bool,
-    // ponytail: `phone` lands in #4 and `capture` in #5. They are on the wire
-    // as nulls now so the shape a client parses does not change under it.
-    pub phone: Option<Value>,
+    pub connection: Connection,
+    // ponytail: `capture` lands in #5. It is on the wire as null now so the
+    // shape a client parses does not change under it.
     pub capture: Option<Value>,
+}
+
+/// One Android device, identified by the serial adb reports, under a name a
+/// person recognises — adb's `model:`, or the serial when adb has none.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Phone {
+    pub serial: String,
+    pub name: String,
+}
+
+/// How far the connection to a phone has got. A phase with its own states and
+/// its own advice, not a precondition that holds or doesn't (ADR-0007).
+///
+/// The wireless states — `NeedsPairing`, `PairingFailed`, `Unreachable` — and
+/// `Reconnecting` join this enum in later tickets. On the wire each variant is
+/// `{"state":"connected","phone":{...}}`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Connection {
+    #[default]
+    NoPhone,
+    /// Several attached and none chosen. omavcam does not pick for you.
+    Unselected {
+        available: Vec<Phone>,
+    },
+    /// Selected, but the debugging prompt on the phone was never accepted.
+    Unauthorised {
+        phone: Phone,
+    },
+    Connecting {
+        phone: Phone,
+    },
+    Connected {
+        phone: Phone,
+    },
 }
 
 pub fn state_message(rev: u64, state: &State) -> String {

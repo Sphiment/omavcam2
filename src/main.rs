@@ -1,4 +1,5 @@
 mod daemon;
+mod phones;
 mod protocol;
 
 use std::io::{BufRead, BufReader, Write};
@@ -8,7 +9,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use protocol::{socket_path, State, VERSION};
+use protocol::{socket_path, Connection, Phone, State, VERSION};
 
 /// Long enough that a busy daemon is never cut off, short enough that a broken
 /// one leaves a message rather than a hung terminal. Under socket activation
@@ -17,20 +18,26 @@ use protocol::{socket_path, State, VERSION};
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn main() -> ExitCode {
-    match std::env::args().nth(1).as_deref() {
-        Some("daemon") => match daemon::run() {
+    let mut args = std::env::args().skip(1);
+    match (args.next().as_deref(), args.next()) {
+        (Some("daemon"), _) => match daemon::run() {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("omavcam: {e}");
                 ExitCode::from(2)
             }
         },
-        Some(kind @ ("status" | "refresh")) => request(kind),
-        other => {
+        (Some(kind @ ("status" | "refresh")), _) => request(kind, json!({})),
+        // A bare `select` goes to the daemon too: its error is what lists the
+        // phones that are attached.
+        (Some("select"), serial) => {
+            request("select", json!({"serial": serial.unwrap_or_default()}))
+        }
+        (other, _) => {
             if let Some(other) = other {
                 eprintln!("omavcam: unknown command: {other}");
             }
-            eprintln!("usage: omavcam [status|refresh|daemon]");
+            eprintln!("usage: omavcam [status|refresh|select <serial>|daemon]");
             ExitCode::from(2)
         }
     }
@@ -38,8 +45,8 @@ fn main() -> ExitCode {
 
 /// Send one request, print the state it produced, and exit on whether the
 /// daemon said it succeeded.
-fn request(kind: &str) -> ExitCode {
-    let (state, response) = match call(kind) {
+fn request(kind: &str, args: Value) -> ExitCode {
+    let (state, response) = match call(kind, args) {
         Ok(pair) => pair,
         Err(e) => {
             // The socket unit is what makes the daemon appear on demand, so
@@ -66,29 +73,49 @@ fn request(kind: &str) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// What `omavcam status` prints.
+/// What `omavcam status` prints. Each connection state gets the advice that
+/// belongs to it: which phone to look at, or which command to run next.
 fn render(state: &State) -> String {
-    let field = |v: &Option<Value>| match v {
-        None => "none".to_string(),
-        Some(v) => v.to_string(),
+    let phone = |p: &Phone| format!("{} ({})", p.name, p.serial);
+    let connection = match &state.connection {
+        Connection::NoPhone => "phone: none".to_string(),
+        Connection::Unselected { available } => {
+            let mut lines = format!("phone: {} attached, none selected\n", available.len());
+            for p in available {
+                lines += &format!("  {}\n", phone(p));
+            }
+            lines + "choose one with: omavcam select <serial>"
+        }
+        Connection::Unauthorised { phone: p } => format!(
+            "phone: {} — unauthorised\naccept the debugging prompt on the phone",
+            phone(p)
+        ),
+        Connection::Connecting { phone: p } => format!("phone: {} — connecting", phone(p)),
+        Connection::Connected { phone: p } => format!("phone: {} — connected", phone(p)),
     };
     format!(
-        "adb: {}\nphone: {}\ncapture: {}",
+        "adb: {}\n{connection}\ncapture: {}",
         if state.adb_ok { "ok" } else { "unavailable" },
-        field(&state.phone),
-        field(&state.capture),
+        match &state.capture {
+            None => "none".to_string(),
+            Some(c) => c.to_string(),
+        },
     )
 }
 
 /// Returns the state at or after the revision the response names, so what we
 /// print is the state that reflects the request rather than whatever arrived
 /// first.
-fn call(kind: &str) -> std::io::Result<(State, Value)> {
+fn call(kind: &str, args: Value) -> std::io::Result<(State, Value)> {
     let stream = UnixStream::connect(socket_path())?;
     stream.set_read_timeout(Some(REPLY_TIMEOUT))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let id = "1";
-    writeln!(&stream, "{}", json!({"v": VERSION, "id": id, "kind": kind}))?;
+    let mut request = json!({"v": VERSION, "id": id, "kind": kind});
+    for (key, value) in args.as_object().into_iter().flatten() {
+        request[key] = value.clone();
+    }
+    writeln!(&stream, "{request}")?;
 
     let mut latest: Option<(u64, State)> = None;
     let mut response: Option<Value> = None;

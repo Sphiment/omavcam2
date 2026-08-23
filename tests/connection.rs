@@ -1,0 +1,256 @@
+//! Getting a phone attached over USB: what adb reports, which phone is
+//! selected, and the rule that omavcam never guesses between two of them.
+
+mod common;
+
+use common::Fixture;
+use serde_json::json;
+
+/// A phone that is used, and one charging off the same laptop.
+const PIXEL: &str = "39281FDJH0031T";
+const GALAXY: &str = "R5CT10ABCDE";
+
+fn is(state: &str) -> impl Fn(&serde_json::Value) -> bool + '_ {
+    move |s: &serde_json::Value| s["connection"]["state"] == json!(state)
+}
+
+#[test]
+fn one_attached_phone_is_selected_automatically_and_named() {
+    let f = Fixture::start();
+    let mut client = f.connect();
+
+    f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
+
+    let state = client.await_state("the phone to connect", is("connected"));
+    assert_eq!(state["connection"]["phone"]["serial"], json!(PIXEL));
+    assert_eq!(state["connection"]["phone"]["name"], json!("Pixel 7"));
+
+    let stdout = String::from_utf8(f.cli(&["status"]).stdout).unwrap();
+    assert!(
+        stdout.contains("Pixel 7"),
+        "status names the phone: {stdout}"
+    );
+}
+
+#[test]
+fn an_unaccepted_debugging_prompt_is_not_the_same_as_no_phone() {
+    let f = Fixture::start();
+    let mut client = f.connect();
+
+    // adb reports an unauthorised phone with no model: it will not answer.
+    f.script_devices(&[(PIXEL, "unauthorized", None)]);
+
+    let state = client.await_state("the phone to report unauthorised", is("unauthorised"));
+    assert_eq!(state["connection"]["phone"]["serial"], json!(PIXEL));
+
+    let stdout = String::from_utf8(f.cli(&["status"]).stdout).unwrap();
+    assert!(stdout.contains("unauthorised"), "{stdout}");
+    assert!(
+        stdout.contains("debugging prompt"),
+        "the advice is to look at the phone, not the cable: {stdout}"
+    );
+}
+
+#[test]
+fn two_attached_phones_are_not_guessed_between() {
+    let f = Fixture::start();
+    let mut client = f.connect();
+
+    f.script_devices(&[
+        (PIXEL, "device", Some("Pixel_7")),
+        (GALAXY, "device", Some("Galaxy_S21")),
+    ]);
+
+    let state = client.await_state("both phones to be offered", is("unselected"));
+    let available = state["connection"]["available"].as_array().unwrap().clone();
+    let serials: Vec<&str> = available
+        .iter()
+        .map(|p| p["serial"].as_str().unwrap())
+        .collect();
+    assert_eq!(serials, vec![PIXEL, GALAXY]);
+
+    let stdout = String::from_utf8(f.cli(&["status"]).stdout).unwrap();
+    assert!(
+        stdout.contains(PIXEL) && stdout.contains(GALAXY),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn an_unauthorised_second_phone_is_never_selected_over_an_authorised_one() {
+    let f = Fixture::start();
+    let mut client = f.connect();
+
+    // The case that drives all of this: anything taking the first entry from
+    // `adb devices` points the webcam at the phone that is merely charging.
+    f.script_devices(&[
+        (GALAXY, "unauthorized", None),
+        (PIXEL, "device", Some("Pixel_7")),
+    ]);
+
+    client.await_state("neither phone to be picked", is("unselected"));
+    assert!(
+        !f.argv().iter().any(|line| line.contains(" -s ")),
+        "no phone was connected to at all: {:?}",
+        f.argv()
+    );
+}
+
+#[test]
+fn a_selected_phone_survives_a_daemon_restart() {
+    let mut f = Fixture::start();
+    f.script_devices(&[
+        (PIXEL, "device", Some("Pixel_7")),
+        (GALAXY, "device", Some("Galaxy_S21")),
+    ]);
+    let mut client = f.connect();
+    client.await_state("the choice to be offered", is("unselected"));
+
+    let response = client.request_with("select", json!({"serial": GALAXY}));
+    assert_eq!(response["ok"], json!(true), "{response}");
+    let state = client.await_state("the chosen phone to connect", is("connected"));
+    assert_eq!(state["connection"]["phone"]["serial"], json!(GALAXY));
+
+    f.restart();
+
+    let mut after = f.connect();
+    let state = after.await_state("the choice to be remembered", is("connected"));
+    assert_eq!(
+        state["connection"]["phone"]["serial"],
+        json!(GALAXY),
+        "the choice is remembered, not made again"
+    );
+}
+
+#[test]
+fn the_last_used_phone_is_reselected_when_it_reappears_among_several() {
+    let f = Fixture::start();
+    let mut client = f.connect();
+    f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
+    client.await_state("the lone phone to connect", is("connected"));
+
+    // The one that was charging is plugged in too. Choosing was a one-time act.
+    f.script_devices(&[
+        (GALAXY, "device", Some("Galaxy_S21")),
+        (PIXEL, "device", Some("Pixel_7")),
+    ]);
+    client.request("refresh");
+
+    let state = client.state();
+    assert_eq!(state["connection"]["state"], json!("connected"));
+    assert_eq!(state["connection"]["phone"]["serial"], json!(PIXEL));
+}
+
+#[test]
+fn the_selected_phone_vanishing_does_not_switch_to_another() {
+    let f = Fixture::start();
+    let mut client = f.connect();
+    f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
+    client.await_state("the phone to connect", is("connected"));
+
+    // Unplugged, and something else is on the desk. Silently repointing a
+    // webcam at a different room is worse than reporting no phone.
+    f.script_devices(&[(GALAXY, "device", Some("Galaxy_S21"))]);
+
+    client.await_state("no phone", is("no_phone"));
+    assert!(
+        !f.argv().iter().any(|line| line.contains(GALAXY)),
+        "the other phone was never touched: {:?}",
+        f.argv()
+    );
+}
+
+#[test]
+fn unplugging_the_phone_returns_to_no_phone() {
+    let f = Fixture::start();
+    let mut client = f.connect();
+    f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
+    client.await_state("the phone to connect", is("connected"));
+
+    f.script_devices(&[]);
+
+    // No restart, no request: the daemon notices by itself.
+    client.await_state("no phone", is("no_phone"));
+}
+
+#[test]
+fn every_adb_call_that_addresses_a_phone_names_its_serial() {
+    let f = Fixture::start();
+    let mut client = f.connect();
+    f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
+    client.await_state("the phone to connect", is("connected"));
+
+    let targeted: Vec<String> = f
+        .argv()
+        .into_iter()
+        .filter_map(|line| line.strip_prefix("adb ").map(str::to_string))
+        // `start-server` and `devices` are the two adb calls that have no
+        // phone to name. Everything else names one.
+        .filter(|args| !args.starts_with("start-server") && !args.starts_with("devices"))
+        .collect();
+
+    assert!(!targeted.is_empty(), "adb was asked about the phone at all");
+    for args in &targeted {
+        assert!(
+            args.starts_with(&format!("-s {PIXEL} ")),
+            "untargeted adb call: adb {args}"
+        );
+    }
+}
+
+#[test]
+fn selecting_a_phone_that_is_not_attached_is_a_clear_error() {
+    let f = Fixture::start();
+    f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
+    let mut client = f.connect();
+    client.await_state("the phone to connect", is("connected"));
+
+    let response = client.request_with("select", json!({"serial": "nosuchphone"}));
+
+    assert_eq!(response["ok"], json!(false));
+    assert_eq!(response["error"]["code"], json!("no_such_phone"));
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(PIXEL),
+        "the error says what is attached: {response}"
+    );
+}
+
+#[test]
+fn the_cli_can_select_a_phone() {
+    let f = Fixture::start();
+    let mut client = f.connect();
+    f.script_devices(&[
+        (PIXEL, "device", Some("Pixel_7")),
+        (GALAXY, "device", Some("Galaxy_S21")),
+    ]);
+    client.await_state("the choice to be offered", is("unselected"));
+
+    let out = f.cli(&["select", GALAXY]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+
+    assert!(out.status.success(), "select failed: {stdout}");
+    assert!(
+        stdout.contains("Galaxy S21"),
+        "the state it printed reflects the choice: {stdout}"
+    );
+}
+
+#[test]
+fn select_with_no_serial_says_which_phones_are_attached() {
+    let f = Fixture::start();
+    let mut client = f.connect();
+    f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
+    client.await_state("the phone to connect", is("connected"));
+
+    // The way out of a dead end: a remembered phone that is unplugged reports
+    // no phone rather than offering the one that is there, so this is where
+    // its serial comes from.
+    let out = f.cli(&["select"]);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains(PIXEL), "{stderr}");
+}

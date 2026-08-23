@@ -46,26 +46,52 @@ left", which `--crop` can.
 
 ## Considered options for off-centre framing
 
-**Relay through a second node.** scrcpy writes cropped to a private node, the
-daemon scales to a fixed size and writes to the public one. Verified working:
-source 640x360, public node pinned at 1280x720 throughout. It also makes the
-public format permanently stable, which solves the whole problem class.
+**Relay through a second node.** scrcpy writes the full frame to a private node;
+the daemon crops *and scales back to a fixed size*, then writes to the public
+one. Verified working, and it delivers the thing the phone-side crop cannot:
 
-Rejected as the default: measured **~24-26% CPU** for the relay stage alone, on
-top of scrcpy's own cost. That is the same order as the host-side cropping
-ADR-0005 rejected for exactly this reason, and it would apply to every session
-including the ones that never crop.
+> The crop rectangle was changed from `640:360:100:100` to `800:450:400:200`
+> with a consumer attached, and the consumer **survived** — frames 632 → 1036,
+> still alive, public node still 1280x720.
 
-**Refuse size-changing Apply while a consumer is attached.** Cheap and honest,
-and the fallback for off-centre crop: the user closes the application, applies,
-reopens. Chosen for the rare case rather than paying the relay for the common
-one.
+**Arbitrary, off-centre framing, adjustable live, mid-call.** The scaling is what
+buys this, not the cropping: cropping alone still changes the output size and
+still freezes consumers. Crop-then-scale-to-fixed is the whole trick.
+
+Measured cost, steady state:
+
+| Pipeline | scrcpy | relay | total |
+|---|---|---|---|
+| Crop on the phone | 36.4% | — | **~36%** |
+| Full frame + host crop and scale | 50.5% | 26.9% | **~77%** |
+
+Roughly 2.1x, and the full frame crosses the cable. Not the default for that
+reason — most sessions never crop, and paying double for all of them to serve
+some of them is the wrong trade.
+
+**But it is enabled on demand**: when an off-centre crop is active, the daemon
+runs the relay; otherwise the capture goes straight to the public node. The cost
+is then paid only by the users of the feature, in the session where they use it.
+
+**Refuse size-changing Apply while a consumer is attached.** Cheap and honest.
+Still the rule for the one thing the relay cannot absorb — changing the *public*
+frame size itself, which is by definition a format change.
 
 ## Consequences
 
-Zoom is the framing control in Studio and can be applied live. Off-centre crop
-remains available but is a size-changing operation: it must be refused, with an
-explanation, while an application holds the camera.
+**Three framing paths, in cost order**, and the daemon picks by what the user
+asked for rather than making them choose:
+
+| Framing | How | Cost | Live-adjustable |
+|---|---|---|---|
+| Centred, tighter | `--camera-zoom` | free | yes |
+| Off-centre | full frame + host crop and scale | ~2.1x | yes |
+| Off-centre, cheap | `--crop` on the phone | cheapest | **no** — freezes consumers |
+
+Zoom is the default and covers the common case at no cost. Dragging the box
+off-centre turns the relay on for that session. The phone-side crop remains the
+cheapest way to hold a fixed off-centre frame, so it stays available for a crop
+set *before* anything is watching — but it can never be adjusted live.
 
 **The public node's frame size becomes a setting of its own**, decided when the
 capture starts rather than derived from lens or crop. `--camera-size` still sets

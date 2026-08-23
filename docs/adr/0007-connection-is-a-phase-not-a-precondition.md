@@ -16,8 +16,28 @@ connection is the user reading an address and a six-digit code off their phone
 and typing them in. The instructions are the feature.
 
 States worth naming, each mapping to something adb reports or a step that can
-visibly fail: no device · found but unauthorised · needs pairing · pairing
-failed · paired, connecting · unreachable · connected · lost, reconnecting.
+visibly fail: no phone · several attached, none selected · selected but
+unauthorised · needs pairing · pairing failed · paired, connecting ·
+unreachable · connected · lost, reconnecting.
+
+## One phone is selected, and every command names it
+
+`adb devices` can list several. The common case is not two phones a user wants
+to choose between — it is one phone they use and one charging off the laptop,
+which appears as `unauthorized` and would be picked by anything that takes the
+first entry.
+
+So selection is part of this machine, not a step before it, and **every `adb`
+and `scrcpy` invocation is targeted with `-s <serial>`**. Untargeted commands
+are correct exactly until a second phone is plugged in, which makes them a
+latent bug that testing on a tidy desk will never surface.
+
+The selected phone is remembered and re-selected when it reappears. When it is
+absent and another phone is attached, omavcam **does not** switch to it: silently
+repointing a webcam at a different room is worse than reporting no phone.
+
+Settings are keyed per phone. Lens ids, available resolutions and zoom ranges
+are device-specific, so a lens id from one phone is meaningless on another.
 
 ## Wireless means pairing, not `adb tcpip`
 

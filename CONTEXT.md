@@ -35,10 +35,16 @@ _Avoid_: zoom, framing, region
 
 ### Connection
 
+**Phone**:
+One Android device, identified by the serial adb reports. Several can be
+attached at once — a second may simply be charging — so exactly one is
+_selected_, and every adb and scrcpy command names it explicitly.
+_Avoid_: device (ambiguous with the virtual camera), handset, target
+
 **Connection**:
-The adb link to one phone, established before any capture can start. It is a
-phase with its own states, failures and guidance, not a precondition that either
-holds or doesn't.
+The adb link to the selected phone, established before any capture can start. It
+is a phase with its own states, failures and guidance, not a precondition that
+either holds or doesn't.
 _Avoid_: device link, session
 
 **Transport**:

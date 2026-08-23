@@ -1,5 +1,10 @@
 # The preview renders in QML, not mpv
 
+> **Superseded for the floating preview by ADR-0013.** The winner turned out to
+> be neither: scrcpy already decodes every frame to write the virtual camera, so
+> it can draw its own window for free. This ADR still governs **Studio**, which
+> needs frames inside our own UI to draw a crop rectangle over them.
+
 Every existing V4L2 preview on this system shells out to mpv — Omarchy's own
 webcam overlay does, and so did the previous omavcam. We render the virtual
 camera directly in a QML `VideoOutput` instead.

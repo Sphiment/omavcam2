@@ -91,6 +91,11 @@ What caught it was checking `fuser /dev/video0` *during* each run and rejecting
 the result if the webcam had been touched. Any future test in this area must do
 the same; a green result without an attribution check means nothing here.
 
+> **The fan-out is no longer needed for the preview — see ADR-0013.** The
+> preview never had to *read* the node: scrcpy already decodes the frames and can
+> draw its own window, cheaper than fanning out and without the extra nodes. The
+> single-reader finding below stands and still governs anything that does read.
+
 ## Decided: the daemon fans out to a second node
 
 The PipeWire option is **closed**, not merely weak — ADR-0012 explains why. It

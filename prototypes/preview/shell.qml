@@ -1,5 +1,14 @@
-// Prototype C: the preview as a real window, with anchor snapping and no drag
-// implementation at all.
+// THROWAWAY PROTOTYPE — DO NOT COPY THIS INTO THE REAL PLUGIN.
+//
+// This exists to prove the ADRs, not to be the implementation. It was written
+// to be run and thrown away: it talks to hyprctl and scrcpy directly instead of
+// through the daemon, hardcodes the things the daemon owns, handles no errors,
+// and persists nothing. Read it for the SHAPE and for the three workarounds in
+// ADR-0006. Then write the real one properly. See prototypes/README.md for the
+// specific things that must not survive.
+//
+// What it demonstrates: the preview as a real window, with anchor snapping and
+// no drag implementation at all.
 //
 // Dragging is the compositor's job — Super+drag moves this like any other
 // window. Snapping is nine named positions you jump to. Dropping drag-snapping

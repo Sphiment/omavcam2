@@ -79,19 +79,33 @@ frame size itself, which is by definition a format change.
 
 ## Consequences
 
-**Three framing paths, in cost order**, and the daemon picks by what the user
-asked for rather than making them choose:
+**Zoom and crop are two different controls, not one.** Zoom is centred and
+free; crop is a rectangle anywhere, and the user picks where it is applied:
 
-| Framing | How | Cost | Live-adjustable |
+| Control | How | Cost | Live-adjustable |
 |---|---|---|---|
-| Centred, tighter | `--camera-zoom` | free | yes |
-| Off-centre | full frame + host crop and scale | ~2.1x | yes |
-| Off-centre, cheap | `--crop` on the phone | cheapest | **no** — freezes consumers |
+| **Zoom** | `--camera-zoom` | free | yes |
+| **Crop, on the phone** | `--crop` | cheapest | **no** — freezes consumers |
+| **Crop, on the host** | full frame + crop and scale | ~2.1x | yes |
 
-Zoom is the default and covers the common case at no cost. Dragging the box
-off-centre turns the relay on for that session. The phone-side crop remains the
-cheapest way to hold a fixed off-centre frame, so it stays available for a crop
-set *before* anything is watching — but it can never be adjusted live.
+Zoom covers the common case at no cost and is never called cropping. Crop is
+offered in both modes because the trade is real and the user is the one who
+knows which they want: bandwidth and CPU, or the ability to reframe mid-call.
+
+## Live crop adjustment is a variable, not a restart
+
+Verified with ffmpeg's `zmq` filter: `crop`'s `w/h/x/y` carry the `T` flag, so
+the rectangle can be retargeted on a running filter graph. 60 updates were sent
+during a live capture — relay never restarted, no errors, `drop=2` of 4621
+frames, and grabbed frames before and after differ.
+
+Timing came out at 33ms per update, but that is the *harness*: each update
+spawned a process and opened a TCP connection. The shipped relay is inside the
+Rust daemon, where the crop rectangle is a variable and retargeting costs
+nothing. ffmpeg and zmq are how this was proven, not how it ships.
+
+(Arch's ffmpeg has `--enable-libzmq` and the `zmq` filter, but ships no
+`zmqsend` binary; the prototype built a 20-line C client against `libzmq`.)
 
 **The public node's frame size becomes a setting of its own**, decided when the
 capture starts rather than derived from lens or crop. `--camera-size` still sets

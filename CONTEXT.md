@@ -29,9 +29,22 @@ The `v4l2loopback` node other applications open. It advertises itself as a
 capture device only while a capture is writing to it.
 _Avoid_: loopback, sink, /dev/video42, device
 
+**Zoom**:
+How tight the shot is, centred. Narrows the field of view without changing the
+frame size, so it can be changed while an application is watching. Bounded by
+the lens's reported zoom range. Not a crop, and never called one.
+_Avoid_: crop, digital zoom, magnification
+
 **Crop**:
-The rectangle of the sensor that reaches the virtual camera. Applied on the
-phone before encoding, so it reduces what crosses the cable.
+The rectangle of the sensor that reaches the virtual camera, at any position.
+Distinct from zoom because it can be off-centre. Comes in two modes, and the
+user chooses:
+- _on the phone_ — applied before encoding, so the discarded pixels never cross
+  the cable. Cheapest, but changes the frame size, so it cannot be adjusted
+  while an application is watching.
+- _on the host_ — the full frame crosses the cable and is cropped and scaled
+  back to a fixed size here. Roughly 2.1x the CPU, and adjustable live.
+
 _Avoid_: zoom, framing, region
 
 ### Connection

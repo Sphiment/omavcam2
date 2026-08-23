@@ -1,5 +1,11 @@
 # Crop happens on the phone, and Studio previews uncropped
 
+> **Superseded in part by ADR-0010.** Everything below about *where* cropping
+> happens still holds. What it missed is that `--crop` changes the virtual
+> camera's frame size, which permanently freezes any application already
+> watching. Framing is therefore `--camera-zoom`, which does not change the
+> size; off-centre crop survives as a restricted operation. Read ADR-0010 first.
+
 Cropping is applied by `scrcpy --crop` on the device, before encoding. Host-side
 cropping is not offered.
 

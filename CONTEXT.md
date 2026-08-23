@@ -71,6 +71,41 @@ The one-time exchange of a six-digit code that authorises wireless debugging.
 Distinct from connecting, which happens every time and can fail on its own.
 _Avoid_: authorising, trusting
 
+### The engine
+
+**Daemon**:
+The one long-lived process that owns the connection, the capture and every
+setting. Socket-activated, so it is started by being connected to and there is
+no state in which it is "not running".
+_Avoid_: server, backend, service (Omarchy's `service` plugin kind is a
+different thing, and deliberately not this — see ADR-0001)
+
+**Client**:
+Anything holding a connection to the daemon: the CLI, the bar widget, Studio.
+Clients render; they never own anything.
+_Avoid_: consumer, subscriber, frontend
+
+**State**:
+The single object the daemon owns and pushes whole to every client whenever it
+changes. There is one, it is complete, and a client that has it needs nothing
+else to render.
+_Avoid_: status, snapshot, model, data
+
+**Revision**:
+A counter that increases each time the state changes, carried on every pushed
+state and on every response. It is what ties a response to the state that
+reflects it. It counts *changes*, not requests, and is scoped to one run of the
+daemon.
+_Avoid_: version (taken by the protocol version), sequence, timestamp
+
+**Request**:
+One thing a client asks the daemon to do, named by its **kind** and carrying an
+id the response echoes. Every request gets exactly one response, which either
+succeeds or names a machine-readable error — that is where CLI exit codes come
+from.
+_Avoid_: command, call, action, message (a message is any line on the wire,
+including a pushed state)
+
 ### Surfaces
 
 **Studio**:

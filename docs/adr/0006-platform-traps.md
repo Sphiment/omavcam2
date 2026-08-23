@@ -83,6 +83,26 @@ discovered. The user must read an address and pairing code off the phone and typ
 them in, which is why the connection flow's guidance is a feature and not
 decoration.
 
+## `systemd-socket-activate` hands the child a curated environment
+
+It is the only way to test socket activation without installing unit files, and
+it does **not** pass your environment through. Dumping the child's `env`:
+
+```
+$ env FOO=bar OMAVCAM_STUB_LOG=/tmp/x systemd-socket-activate -l s.sock -- sh -c 'env'
+LISTEN_FDS=1
+LISTEN_PID=1344532
+PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:...
+```
+
+`PATH` survives. `FOO` and `OMAVCAM_STUB_LOG` are gone. Anything the child needs
+has to be passed explicitly with `--setenv=NAME=VALUE`.
+
+The failure is quiet in exactly the wrong way: with a stub directory on `PATH`
+the stubs *do* get found and run, so the daemon starts and answers normally —
+but every stub writes its argv to an empty path and records nothing. A test
+asserting on recorded argv fails while the thing it is testing works.
+
 ## `Style.gapsOut` is not `gaps_out`
 
 Omarchy's theme token reads 5 while Hyprland's `general:gaps_out` is 10 — it

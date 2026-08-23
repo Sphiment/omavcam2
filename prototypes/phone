@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Real capture from the plugged phone into /dev/video42, the way omavcam does it.
+#   ./phone start [camera-id] [fps]   ./phone stop   ./phone cams
+set -euo pipefail
+
+DEV=/dev/video42
+PIDFILE=/tmp/omavcam-proto-phone.pid
+LOG=/tmp/omavcam-proto-phone.log
+
+cams() { scrcpy --list-cameras 2>&1 | grep -E '^\s+--camera-id'; }
+
+start() {
+  local id="${1:-1}" fps="${2:-30}" size="${3:-}"
+  if [[ -f $PIDFILE ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+    echo "already capturing (pid $(cat "$PIDFILE"))"; exit 0
+  fi
+  echo "starting camera-id=$id at ${fps}fps -> $DEV"
+  setsid scrcpy \
+    --video-source=camera \
+    --camera-id="$id" \
+    --camera-fps="$fps" \
+    ${size:+--camera-size="$size"} \
+    --v4l2-sink="$DEV" \
+    --no-audio \
+    --no-window \
+    &>"$LOG" &
+  echo $! >"$PIDFILE"
+
+  # The node only advertises capture capability once frames are flowing.
+  for _ in {1..40}; do
+    if v4l2-ctl --device "$DEV" --info 2>/dev/null |
+       awk '/Device Caps/{i=1;next} i&&/Video Capture/{f=1} END{exit !f}'; then
+      echo "streaming. stop with: $0 stop"
+      v4l2-ctl --device "$DEV" --get-fmt-video 2>/dev/null | grep -E 'Width/Height|Pixel Format'
+      exit 0
+    fi
+    sleep 0.5
+  done
+  echo "no frames after 20s; see $LOG" >&2
+  tail -20 "$LOG" >&2
+  exit 1
+}
+
+stop() {
+  [[ -f $PIDFILE ]] || { echo "not capturing"; exit 0; }
+  pkill -P "$(cat "$PIDFILE")" 2>/dev/null || true
+  kill "$(cat "$PIDFILE")" 2>/dev/null || true
+  pkill -f 'scrcpy.*v4l2-sink' 2>/dev/null || true
+  rm -f "$PIDFILE"
+  echo "stopped"
+}
+
+case "${1:-start}" in
+  start) shift; start "$@" ;;
+  stop) stop ;;
+  cams) cams ;;
+  *) echo "usage: $0 start [camera-id] [fps] | stop | cams" >&2; exit 1 ;;
+esac

@@ -415,6 +415,10 @@ fn publish_connection(shared: &Shared, connection: Connection, attached: Vec<pro
         attached,
         known,
         settings,
+        // Re-checked on every pass rather than once at startup: a user who
+        // installs the missing package while the daemon is up should see the
+        // offer disappear without restarting anything.
+        missing: capture::missing(),
         ..shared.lock().unwrap().state.clone()
     };
     publish(shared, state);
@@ -442,6 +446,7 @@ fn publish_adb_failure(shared: &Shared) {
             attached: Vec::new(),
             known,
             settings,
+            missing: capture::missing(),
             ..previous
         },
     );
@@ -1708,6 +1713,7 @@ pub fn run() -> std::io::Result<()> {
         state: State {
             adb_ok,
             known: registry.phones.clone(),
+            missing: capture::missing(),
             ..Default::default()
         },
         clients: HashMap::new(),

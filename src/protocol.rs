@@ -63,6 +63,23 @@ pub struct State {
     /// their live theme with these rather than assuming a one-shot sync held.
     #[serde(default)]
     pub preview_style: PreviewStyle,
+    /// What omavcam needs and cannot find. Empty on a complete install. A
+    /// client renders it as an offer to install; nothing here is something the
+    /// daemon can repair itself (ADR-0008).
+    #[serde(default)]
+    pub missing: Vec<Missing>,
+}
+
+/// One thing omavcam needs and cannot find, with the command that gets it.
+/// "Something is missing" is not something anyone can act on, and neither is a
+/// package name when the package is already installed and merely unloaded —
+/// so the daemon works out the command and every client renders it verbatim.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Missing {
+    /// `adb`, `scrcpy`, `v4l2-ctl`, `hyprctl`, or the virtual camera itself.
+    pub what: String,
+    /// One command, ready to run, that ends with `what` being there.
+    pub install: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

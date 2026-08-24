@@ -59,10 +59,16 @@ Panel {
     return width > 0 && height > 0 ? Math.max(1, Math.round(640 * height / width)) : 360
   }
 
+  // What omavcam needs and has not got, in the daemon's own words: each entry
+  // is a `what` and the `package` that supplies it. The daemon re-checks on
+  // every pass, so this empties itself once the install happens.
+  readonly property var missing: daemonState ? (daemonState.missing || []) : []
+
   // What the bar has to warn about: something is wrong and only the person at
   // the desk can fix it. No phone attached is not trouble, it is Tuesday.
   readonly property bool troubled: daemonState
-    ? (!daemonState.adb_ok
+    ? (missing.length > 0
+      || !daemonState.adb_ok
       || connectionState === "unauthorised"
       || connectionState === "pairing_failed"
       || connectionState === "unreachable"
@@ -107,6 +113,12 @@ Panel {
       notes.push("A dimmed phone has not accepted the debugging prompt")
     return notes.join(" · ")
   }
+
+  // Where the daemon's socket is, by the same rule the daemon uses. Named once
+  // because the Socket below and the install offer must not disagree about
+  // which path went unanswered.
+  readonly property string socketPath: Quickshell.env("OMAVCAM_SOCKET")
+    || (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/omavcam.sock"
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
@@ -223,6 +235,27 @@ Panel {
     return connection.state
   }
 
+  // A missing engine is the one thing the panel cannot ask the daemon about,
+  // because the daemon is the engine. An unanswered socket that has stayed
+  // unanswered across retries is either not installed or not starting, and
+  // both are installs — never a stack trace. A daemon being restarted is not:
+  // it comes back inside the first wait, so the offer waits for the interval
+  // to have stretched rather than telling someone to install what they have.
+  //
+  // The offer is the command, not a button: this file runs nothing (ADR-0001),
+  // and every command below the first line is the daemon's own words.
+  function installWords() {
+    if (!root.socketUp) {
+      if (retry.interval === retry.firstInterval) return ""
+      return "No engine answered " + root.socketPath + ".\n"
+        + "Install it:  yay -S omavcam-git\n"
+        + "Already installed? systemctl --user status omavcam.socket omavcam.service"
+    }
+    return root.missing.map(function (item) {
+      return "Missing " + item.what + "\n  " + item.install
+    }).join("\n")
+  }
+
   function captureWords() {
     if (reconnecting && capturing) return "Reconnecting to " + daemonState.capture.phone.name + " — last frame held"
     if (capturing) return daemonState.capture.size + " from " + daemonState.capture.phone.name
@@ -255,8 +288,7 @@ Panel {
       // the link open whether the panel is showing or not — the bar has to
       // know about a capture nobody started from here.
       connected: true
-      path: Quickshell.env("OMAVCAM_SOCKET")
-        || (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/omavcam.sock"
+      path: root.socketPath
 
       parser: SplitParser {
         splitMarker: "\n"
@@ -480,6 +512,25 @@ Panel {
               tooltipText: modelData.phone.serial
               onClicked: root.send("select", {"serial": modelData.phone.serial})
             }
+          }
+        }
+
+        // ---------- what is not installed ----------
+        Column {
+          width: parent.width
+          spacing: Style.space(8)
+          visible: root.installWords() !== ""
+
+          PanelSeparator { foreground: root.foreground }
+
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            text: root.installWords()
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
           }
         }
 

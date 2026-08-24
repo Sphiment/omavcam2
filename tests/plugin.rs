@@ -176,3 +176,22 @@ fn nothing_a_phone_wrote_can_become_markup() {
         );
     }
 }
+
+/// A fresh machine has no engine to talk to, and the widget is the first thing
+/// on screen. It cannot install anything itself, so what it owes the user is
+/// the command — a missing binary is a prompt, not a stack trace (#16).
+#[test]
+fn the_widget_offers_the_install_it_cannot_perform() {
+    let panel = fs::read_to_string(repo().join("plugin/Panel.qml")).expect("Panel.qml");
+
+    assert!(
+        panel.contains("omavcam-git"),
+        "an unanswered socket has to name the package that supplies the engine"
+    );
+    // The specific names come from the daemon, so the widget renders them
+    // rather than keeping a list of tools that would drift from the daemon's.
+    assert!(
+        panel.contains("daemonState.missing"),
+        "the missing dependencies the daemon names are what the panel offers"
+    );
+}

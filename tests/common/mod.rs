@@ -25,6 +25,10 @@ const PROTOCOL_VERSION: u32 = 4;
 pub struct Fixture {
     dir: PathBuf,
     poll_ms: String,
+    /// Whether the stub dir is the *whole* PATH. Off by default, because most
+    /// tests only need the stubs to win; a test about something being missing
+    /// needs the machine's real scrcpy not to be there either.
+    isolated: bool,
     socket: PathBuf,
     log: PathBuf,
     stub_dir: PathBuf,
@@ -128,6 +132,7 @@ impl Fixture {
 
         let fixture = Fixture {
             poll_ms: "25".to_string(),
+            isolated: false,
             socket: dir.join("omavcam.sock"),
             log: dir.join("argv.log"),
             stub_dir,
@@ -194,11 +199,22 @@ impl Fixture {
     }
 
     pub fn path(&self) -> String {
+        if self.isolated {
+            return self.bin_dir.display().to_string();
+        }
         format!(
             "{}:{}",
             self.bin_dir.display(),
             std::env::var("PATH").unwrap_or_default()
         )
+    }
+
+    /// Take a tool off the daemon's PATH entirely: the stub goes, and the
+    /// stub dir becomes the whole PATH so the real one on this machine cannot
+    /// stand in for it. Call before `spawn`.
+    pub fn script_missing(&mut self, tool: &str) {
+        self.isolated = true;
+        let _ = fs::remove_file(self.bin_dir.join(tool));
     }
 
     pub fn restart(&mut self) {

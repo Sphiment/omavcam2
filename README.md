@@ -16,71 +16,155 @@ everything else is built on, wired and wireless connection, and a capture that
 can be started and stopped: `omavcam start` makes the phone's camera appear in
 Meet's camera list. Lens, resolution, frame rate, aspect ratio and zoom can be
 staged and applied from the CLI. There is also a bar widget, so starting and
-stopping needs no terminal.
+stopping needs no terminal, and an AUR package that installs the engine and
+configures the module, so none of it has to be assembled by hand.
 
 There is no Studio yet. That is the next ticket.
 
-## Requirements
-
-- Rust (`pacman -S rustup && rustup default stable`)
-- systemd (user session)
-- `android-tools` for `adb`, `scrcpy` for the capture, and `v4l-utils` for
-  `v4l2-ctl` — none of them needed to build or test, only to run
-- `v4l2loopback-dkms`, loaded and labelled `omavcam` at boot. That is the
-  package's job, not the daemon's: a `systemd --user` service has no capability
-  to load a module (ADR-0008). Until [#16](../../issues/16) packages it:
-
-  ```sh
-  echo v4l2loopback | sudo tee /etc/modules-load.d/omavcam.conf
-  echo 'options v4l2loopback video_nr=42 card_label=omavcam exclusive_caps=1' \
-    | sudo tee /etc/modprobe.d/omavcam.conf
-  ```
-
-  `exclusive_caps=1` is what keeps an idle omavcam out of every application's
-  camera list, and what makes the node readable at all (ADR-0012).
-
-## Build
-
-```sh
-cargo build --release
-```
-
-The binary lands at `target/release/omavcam`.
-
 ## Install
 
-**The default Omarchy plugin install is not enough on its own.** Most Omarchy
-plugins are pure QML and `omarchy plugin add` is their whole installation; this
-one's widget is a thin client for a Rust daemon, so the daemon has to be built
-and installed too or the widget has nothing to talk to. Nothing packages this
-yet — that is [#16](../../issues/16). Until then, by hand:
+omavcam is two halves: the **engine** — a Rust daemon and the `omavcam` CLI,
+installed from the AUR — and the **bar widget**, an Omarchy plugin installed by
+cloning this repo. Both are needed: the widget is a client and does nothing on
+its own.
 
 ```sh
-# 1. Clone and build the daemon (needs Rust, see Requirements)
-git clone https://github.com/Sphiment/omavcam2.git
-cd omavcam2
-cargo build --release
+# 1. The engine. Building takes a few minutes; it is Rust.
+yay -S omavcam-git
 
-# 2. Install the daemon and its systemd user units
-sudo install -Dm755 target/release/omavcam /usr/bin/omavcam
-install -Dm644 systemd/omavcam.socket ~/.config/systemd/user/omavcam.socket
-install -Dm644 systemd/omavcam.service ~/.config/systemd/user/omavcam.service
-systemctl --user daemon-reload
-systemctl --user enable --now omavcam.socket
+# 2. Reboot. The package configures the module to load at boot and enables the
+#    daemon's socket for every user, and neither is picked up by a session that
+#    was already running. To skip the reboot, do both by hand instead:
+sudo modprobe v4l2loopback
+systemctl --user daemon-reload && systemctl --user start omavcam.socket
 
-# 3. Add the bar widget — this is the only step the default plugin install covers
+# 3. The bar widget.
 omarchy plugin add https://github.com/Sphiment/omavcam2.git --enable
 ```
 
-The binary has to be at `/usr/bin/omavcam` because that is the path
+Then plug a phone in, accept the debugging prompt on it, and click the widget —
+or run `omavcam start`. The virtual camera appears in Meet, Zoom, OBS and
+Discord once a capture is running, and disappears again when it stops.
+
+After the reboot nothing here needs root again: connecting to the socket is
+what starts the daemon, and the module is already loaded and labelled.
+
+The package pulls in everything omavcam needs: `scrcpy`, `android-tools` for
+`adb`, `v4l-utils` for `v4l2-ctl`, `v4l2loopback-dkms` for the virtual camera
+itself, and `hyprland` for the `hyprctl` every capture uses to place its
+preview. If one of them goes missing later, `omavcam status` and the
+panel name it and the package that supplies it rather than failing at the
+moment you need the camera.
+
+### What the package installs, and why root is only involved once
+
+| Path | What it is |
+|---|---|
+| `/usr/bin/omavcam` | the daemon and the CLI, one binary |
+| `/usr/lib/systemd/user/omavcam.{socket,service}` | socket activation: connecting is what starts the daemon |
+| `/usr/lib/systemd/user/sockets.target.wants/omavcam.socket` | enabled on install, for every user |
+| `/usr/lib/modules-load.d/omavcam.conf` | loads `v4l2loopback` at boot |
+| `/usr/lib/modprobe.d/omavcam.conf` | its parameters: two nodes, labelled, `exclusive_caps=1` |
+
+The module configuration is installed rather than applied at runtime because a
+`systemd --user` service has **no capabilities at all** — measured `CapEff:
+0000000000000000`, so `modprobe` fails for it (ADR-0008). Nothing in omavcam
+ever calls `modprobe`; a test asserts it.
+
+That means the module is loaded from boot and its nodes always exist. It is
+harmless: with `exclusive_caps=1` a node advertises output only until a
+producer attaches, so an idle omavcam is in nobody's camera list.
+
+`exclusive_caps=1` is on **every** node, including the internal one, and it is
+not optional. A node created with `exclusive_caps=0` advertises capture and
+output at once, which makes browsers refuse to list it *and* makes it
+unreadable — the single cause behind three separate failures (ADR-0012). Two
+nodes are created: the public `omavcam`, and `omavcam studio` for Studio's
+uncropped preview, which must never reach the node applications consume
+(ADR-0009). To change any of this, put your own file in `/etc/modprobe.d` — it
+wins over the package's.
+
+That cuts both ways: if you set omavcam up by hand before there was a package,
+delete the files you wrote or they will keep overriding it, and you will have
+one node where the package creates two.
+
+```sh
+sudo rm -f /etc/modprobe.d/omavcam.conf /etc/modules-load.d/omavcam.conf
+sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback
+```
+
+### Building it yourself
+
+No AUR helper, or working on omavcam:
+
+```sh
+git clone https://github.com/Sphiment/omavcam2.git
+cd omavcam2
+cargo build --release              # needs rustup: pacman -S rustup && rustup default stable
+makepkg -si -p packaging/PKGBUILD  # or install the pieces by hand, as below
+```
+
+By hand, which is the same set of files without pacman knowing about them:
+
+```sh
+sudo install -Dm755 target/release/omavcam /usr/bin/omavcam
+sudo install -Dm644 systemd/omavcam.socket /usr/lib/systemd/user/omavcam.socket
+sudo install -Dm644 systemd/omavcam.service /usr/lib/systemd/user/omavcam.service
+sudo install -Dm644 packaging/omavcam.modules-load.conf /usr/lib/modules-load.d/omavcam.conf
+sudo install -Dm644 packaging/omavcam.modprobe.conf /usr/lib/modprobe.d/omavcam.conf
+systemctl --user enable --now omavcam.socket
+sudo modprobe v4l2loopback
+```
+
+The binary has to be at `/usr/bin/omavcam`, because that is the path
 `omavcam.service` names.
 
-**Enabling the socket is what makes the daemon exist.** systemd holds the
-listening socket and starts the daemon the first time something connects to it,
-which is why there is no "daemon isn't running" error in this product. It also
-means the daemon survives `omarchy-restart-shell`: it is a systemd unit, not an
-Omarchy `service` plugin, and those are QML singletons that die with the shell
-(ADR-0001).
+### Uninstall
+
+```sh
+systemctl --user stop omavcam.socket omavcam.service
+yay -Rns omavcam-git          # takes the units and the module configuration with it
+omarchy plugin remove sphiment.omavcam2
+```
+
+`stop`, not `disable`: the socket was enabled by a symlink the package owns, so
+removing the package is what disables it, and `omavcam.service` is never
+enabled at all — it exists to be socket-activated.
+
+Removing the package unloads `v4l2loopback` as well, so nothing is left holding
+a camera node. A module something else is actually using has a non-zero
+refcount and is left alone — and nothing omavcam installed will load it again.
+
+## Suggested: make the preview snap where you want it
+
+This is a change **you** make, not one omavcam makes. Hyprland's own snapping
+is what parks the floating preview neatly (ADR-0004), and `respect_gaps` is
+what parks it at `gaps_out` instead of flush against the screen edge:
+
+```lua
+hl.config({ general = { snap = {
+  enabled = true, respect_gaps = true, monitor_gap = 60, window_gap = 60,
+} } })
+```
+
+`monitor_gap` and `window_gap` are **thresholds** — how close you have to drag
+before the magnet grabs — not the resulting inset. The default of 10 makes them
+nearly impossible to hit; 60–90 feels right.
+
+omavcam will never write this for you. It is a global compositor setting that
+changes how *every* floating window behaves, and a plugin has no business
+deciding that. omavcam writes nothing to your Hyprland config at all.
+
+## This is Omarchy-specific
+
+The widget is an Omarchy plugin and assumes Omarchy's shell: its `Panel`,
+`Toggle` and `Style` components, its theme tokens, and `omarchy plugin add` as
+the way it is installed. The preview's window rules are written in Omarchy's
+Lua wrapper (`hl.config`, `o.window`), which stock Hyprland does not have.
+
+The engine itself is less fussy — the daemon, the CLI and the capture need only
+systemd, Hyprland and the tools above — but nothing here is tested anywhere
+else, and the Lua assumptions do not hold on stock Hyprland.
 
 ## Use
 
@@ -222,9 +306,12 @@ the ordinary way:
 omarchy plugin add https://github.com/Sphiment/omavcam2.git --enable
 ```
 
-The widget is only a client, though: the daemon must be built and installed
-first, or the bar shows a widget with nothing behind it — see
-[Install](#install).
+The widget is only a client, though: the engine has to be installed too, or
+the bar shows a widget with nothing behind it — see [Install](#install). When
+that is the case the panel says so and names the command that fixes it, and it
+does the same for a missing `scrcpy`, `adb` or `v4l2loopback-dkms`: the daemon
+reports what it cannot find and the package that supplies it, and the panel
+offers the install. It never runs one — it runs nothing at all (ADR-0001).
 
 The icon says which of three things is true at a glance: a capture is running,
 nothing is capturing, or something is wrong that only the person at the desk
@@ -306,6 +393,7 @@ src/main.rs       the CLI, and the entry point for both
 manifest.json     the Omarchy plugin manifest, at the root so a clone installs
 plugin/Panel.qml  the bar widget and its panel: a client, and nothing more
 systemd/          the socket and service units
+packaging/        the AUR PKGBUILD, its install hook, and the module config
 tests/common/     the harness every test file is built on
 tests/            the tests, and the stub adb/scrcpy/v4l2-ctl/modprobe
 CONTEXT.md        the vocabulary; use these words, avoid the listed synonyms

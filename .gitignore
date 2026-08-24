@@ -2,3 +2,6 @@
 .claude/
 
 /target/
+
+# Throwaway spikes: kept locally, never shipped.
+/prototypes/

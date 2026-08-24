@@ -3,6 +3,7 @@ mod command;
 mod daemon;
 mod phones;
 mod protocol;
+mod settings;
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -32,6 +33,17 @@ fn main() -> ExitCode {
         [kind] if matches!(kind.as_str(), "status" | "refresh" | "start" | "stop") => {
             request(kind, json!({}))
         }
+        [kind] if matches!(kind.as_str(), "apply" | "discard") => request(kind, json!({})),
+        [command, setting, value] if command == "set" => match setting_value(setting, value) {
+            Ok(value) => request(
+                "set",
+                json!({"setting": setting.replace('-', "_"), "value": value}),
+            ),
+            Err(message) => {
+                eprintln!("omavcam: invalid setting: {message}");
+                ExitCode::from(2)
+            }
+        },
         // Opt-in, because it changes a setting on someone's phone.
         [command, flag] if command == "start" && flag == "--stay-awake" => {
             request("start", json!({"stay_awake": true}))
@@ -45,10 +57,41 @@ fn main() -> ExitCode {
                 eprintln!("omavcam: invalid command: {command}");
             }
             eprintln!(
-                "usage: omavcam [status|refresh|select <serial>|start [--stay-awake]|stop|daemon]"
+                "usage: omavcam [status|refresh|select <serial>|start [--stay-awake]|stop|\
+                 set <lens|resolution|frame-rate|aspect-ratio|zoom|crop> <value>|apply|discard|daemon]"
             );
             ExitCode::from(2)
         }
+    }
+}
+
+fn setting_value(setting: &str, value: &str) -> Result<Value, String> {
+    match setting {
+        "frame-rate" => value
+            .parse::<u32>()
+            .map(Value::from)
+            .map_err(|_| "frame-rate must be a positive integer".to_string()),
+        "zoom" => value
+            .parse::<f64>()
+            .map(Value::from)
+            .map_err(|_| "zoom must be a number".to_string()),
+        "crop" if value == "none" => Ok(Value::Null),
+        "crop" => {
+            let numbers = value
+                .split(':')
+                .map(str::parse::<f64>)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| "crop must be normalized x:y:width:height or none".to_string())?;
+            match numbers.as_slice() {
+                [x, y, width, height] => {
+                    Ok(json!({"x": x, "y": y, "width": width, "height": height}))
+                }
+                _ => Err("crop must be normalized x:y:width:height or none".to_string()),
+            }
+        }
+        "frame_rate" | "aspect_ratio" => Err(format!("use {}", setting.replace('_', "-"))),
+        "lens" | "resolution" | "aspect-ratio" => Ok(Value::String(value.to_string())),
+        other => Err(format!("no such setting {other:?}")),
     }
 }
 
@@ -117,8 +160,32 @@ fn render(state: &State) -> String {
         Connection::Connecting { phone: p } => format!("phone: {} — connecting", phone(p)),
         Connection::Connected { phone: p } => format!("phone: {} — connected", phone(p)),
     };
+    let settings = state.settings.as_ref().map_or_else(
+        || "settings: unavailable".to_string(),
+        |settings| {
+            let pending = &settings.pending;
+            format!(
+                "settings: lens {}, {}, {}fps, {}, zoom {}{}{}",
+                pending.lens,
+                pending.resolution,
+                pending.frame_rate,
+                pending.aspect_ratio,
+                pending.zoom,
+                if settings.has_pending_changes {
+                    " — pending Apply"
+                } else {
+                    " — applied"
+                },
+                settings
+                    .rejected
+                    .as_ref()
+                    .map(|message| format!("\nrejected: {message}"))
+                    .unwrap_or_default()
+            )
+        },
+    );
     format!(
-        "adb: {}\n{connection}\ncapture: {}",
+        "adb: {}\n{connection}\ncapture: {}\n{settings}",
         if state.adb_ok { "ok" } else { "unavailable" },
         match &state.capture {
             None => "none".to_string(),

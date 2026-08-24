@@ -9,20 +9,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::command;
+use crate::settings::{self, CameraSettings};
 
 /// The `card_label` the package's `modprobe.d` file gives the virtual camera,
 /// and the only thing that identifies it. `video_nr` is a request, not a
 /// guarantee — another device can already hold the number (ADR-0008).
 pub const CARD_LABEL: &str = "omavcam";
-
-/// The frame size every capture is launched at. An application that opens the
-/// node pins the format, so a writer arriving later at a different size
-/// delivers nothing — silently, and forever (ADR-0010). One constant is what
-/// makes every restart match.
-///
-// ponytail: a constant until #9 makes resolution a setting. Then the size the
-// running capture recorded is what a restart has to reuse, not this.
-pub const SIZE: &str = "1280x720";
 
 /// How long the node keeps delivering frames after its writer stops. Enough
 /// that an application which times out on stalled input keeps its camera when
@@ -127,26 +119,35 @@ pub fn set_controls(node: &str) {
 /// no window here (`--no-window`), so nothing can forward anything, and the
 /// two only collide when the preview ticket lands.
 ///
-// ponytail: `--camera-size` is refused by scrcpy if the lens does not offer
-// exactly that size, and the capture then dies on launch. #9 has to ask
-// `--list-camera-sizes` once it lets anyone choose a size.
-pub fn spawn(serial: &str, node: &str, stay_awake: bool) -> std::io::Result<Child> {
+pub fn spawn(
+    serial: &str,
+    node: &str,
+    stay_awake: bool,
+    settings: &CameraSettings,
+) -> std::io::Result<Child> {
     if node_is_capture(node)? {
         return Err(std::io::Error::new(
             std::io::ErrorKind::AddrInUse,
             format!("{node} already has a producer"),
         ));
     }
-    let mut child = Command::new("scrcpy")
-        .args([
-            "-s",
-            serial,
-            "--video-source=camera",
-            &format!("--camera-size={SIZE}"),
-            &format!("--v4l2-sink={node}"),
-            "--no-audio",
-            "--no-window",
-        ])
+    let mut process = Command::new("scrcpy");
+    process.args([
+        "-s",
+        serial,
+        "--video-source=camera",
+        &format!("--camera-id={}", settings.lens),
+        &format!("--camera-size={}", settings.resolution),
+        &format!("--camera-fps={}", settings.frame_rate),
+        &format!("--camera-zoom={}", settings.zoom),
+        &format!("--v4l2-sink={node}"),
+        "--no-audio",
+        "--no-window",
+    ]);
+    if let Some((width, height, x, y)) = settings::crop_pixels(settings) {
+        process.arg(format!("--crop={width}:{height}:{x}:{y}"));
+    }
+    let mut child = process
         .args(match stay_awake {
             true => ["--stay-awake"],
             false => ["--no-control"],
@@ -197,6 +198,33 @@ pub fn spawn(serial: &str, node: &str, stay_awake: bool) -> std::io::Result<Chil
         }
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+/// Whether another process has the virtual camera open. scrcpy itself is the
+/// writer and is excluded; any remaining fd is an application that has pinned
+/// the frame size (ADR-0010).
+pub fn has_consumer(node: &str, writer_pid: u32) -> std::io::Result<bool> {
+    // ponytail: a /proc scan on the rare size-changing Apply; track fd events
+    // only if machines with thousands of processes make this measurable.
+    let proc = std::env::var("OMAVCAM_PROC_DIR").unwrap_or_else(|_| "/proc".into());
+    Ok(fs::read_dir(proc)?.filter_map(Result::ok).any(|process| {
+        process
+            .file_name()
+            .to_string_lossy()
+            .parse::<u32>()
+            .ok()
+            .is_some_and(|pid| {
+                pid != writer_pid
+                    && fs::read_dir(process.path().join("fd"))
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Result::ok)
+                        .any(|fd| {
+                            fs::read_link(fd.path())
+                                .is_ok_and(|target| target == std::path::Path::new(node))
+                        })
+            })
+    }))
 }
 
 fn node_is_capture(node: &str) -> std::io::Result<bool> {

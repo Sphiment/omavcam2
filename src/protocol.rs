@@ -14,6 +14,8 @@
 //! {"v":2,"id":"7","kind":"status"}
 //! {"v":2,"id":"8","kind":"select","serial":"39281FDJH0031T"}
 //! {"v":2,"id":"9","kind":"start"}
+//! {"v":2,"id":"10","kind":"set","setting":"zoom","value":2}
+//! {"v":2,"id":"11","kind":"apply"}
 //! ```
 //!
 //! The daemon pushes the *whole* state, unprompted, to every connected client
@@ -23,6 +25,8 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+use crate::settings::SettingsState;
 
 /// Bumped whenever the shape below changes incompatibly. A client sending
 /// anything else is rejected with an error rather than misparsed.
@@ -48,6 +52,10 @@ pub struct State {
     /// asking for one.
     #[serde(default)]
     pub attached: Vec<Attached>,
+    /// Camera capabilities and the selected phone's applied and pending
+    /// settings. Absent until a connected phone has answered scrcpy's probe.
+    #[serde(default)]
+    pub settings: Option<SettingsState>,
 }
 
 /// One phone adb reports, and whether adb will talk to it.

@@ -4,6 +4,7 @@
 //! never guesses: the second phone on the desk is usually charging, not waiting
 //! to be a webcam.
 
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::command;
 use crate::protocol::{Connection, Phone};
+use crate::settings::CameraSettings;
 
 /// One line of `adb devices -l`: the serial, adb's own word for its state, and
 /// the model if adb knows it — an unauthorised phone reports none.
@@ -153,6 +155,7 @@ impl From<&Attached> for crate::protocol::Attached {
 #[serde(default)]
 pub struct Registry {
     pub selected: Option<String>,
+    pub settings: BTreeMap<String, CameraSettings>,
 }
 
 fn registry_path(state_dir: &Path) -> PathBuf {

@@ -252,8 +252,19 @@ fn render(state: &State) -> String {
             rendered
         },
     );
+    // First, because nothing below it is actionable while something is
+    // missing, and the install is the only thing to do about it.
+    let missing = if state.missing.is_empty() {
+        String::new()
+    } else {
+        let mut lines = "missing:".to_string();
+        for missing in &state.missing {
+            lines += &format!("\n  {}\n    {}", missing.what, missing.install);
+        }
+        lines + "\n"
+    };
     format!(
-        "adb: {}\n{connection}\n{known}\ncapture: {}\n{settings}",
+        "{missing}adb: {}\n{connection}\n{known}\ncapture: {}\n{settings}",
         if state.adb_ok { "ok" } else { "unavailable" },
         match &state.capture {
             None => "none".to_string(),

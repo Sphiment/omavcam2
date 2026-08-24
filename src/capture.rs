@@ -3,6 +3,7 @@
 //! node is, how it must be configured, and what scrcpy is launched with.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -11,7 +12,13 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::command;
+use crate::protocol::Missing;
 use crate::settings::{self, CameraSettings};
+
+/// The AUR package that ships the daemon and the module configuration. Named
+/// in every message about something being missing, because "install the
+/// package" is not an instruction anyone can follow.
+pub const PACKAGE: &str = "omavcam-git";
 
 /// The `card_label` the package's `modprobe.d` file gives the virtual camera,
 /// and the only thing that identifies it. `video_nr` is a request, not a
@@ -44,7 +51,7 @@ pub fn find_node() -> Result<String, String> {
         .map_err(|e| {
             format!(
                 "could not inspect {}: {e}. The v4l2loopback module is not loaded; \
-                 install the omavcam package, which creates and labels its nodes at boot",
+                 install {PACKAGE}, which creates and labels its nodes at boot",
                 directory.display()
             )
         })?
@@ -62,8 +69,8 @@ pub fn find_node() -> Result<String, String> {
         [node] => Ok(format!("/dev/{node}")),
         [] => Err(format!(
             "no video node is labelled {CARD_LABEL:?}: the v4l2loopback module is not loaded. \
-             Install the omavcam package, which ships the modules-load.d and modprobe.d files \
-             that load and label it — a user daemon cannot load a module itself."
+             Install {PACKAGE}, which ships the modules-load.d and modprobe.d files that load \
+             and label it — a user daemon cannot load a module itself."
         )),
         nodes => Err(format!(
             "more than one video node is labelled {CARD_LABEL:?} ({}); \
@@ -71,6 +78,56 @@ pub fn find_node() -> Result<String, String> {
             nodes.join(", ")
         )),
     }
+}
+
+/// What a capture needs and this machine does not have. Each entry names the
+/// tool the way the user knows it and the package that supplies it, so a
+/// client can offer the install rather than waiting for a capture to fail
+/// (#16). Nothing here is repairable at runtime: the tools are packages, and
+/// the module is loaded at install time (ADR-0008).
+pub fn missing() -> Vec<Missing> {
+    let mut missing: Vec<Missing> = [
+        ("adb", "android-tools"),
+        ("scrcpy", "scrcpy"),
+        ("v4l2-ctl", "v4l-utils"),
+        // Not just the preview's: every capture applies the window rules
+        // before scrcpy is launched, so a missing hyprctl is a failed start.
+        ("hyprctl", "hyprland"),
+    ]
+    .into_iter()
+    .filter(|(tool, _)| !on_path(tool))
+    .map(|(what, package)| Missing {
+        what: what.to_string(),
+        install: format!("sudo pacman -S --needed {package}"),
+    })
+    .collect();
+    // The node, not the module: a module present but unconfigured leaves the
+    // same hole, and the label is the only thing that proves the package's
+    // modprobe.d is in force.
+    //
+    // One command for both causes, because the daemon cannot tell them apart
+    // and the user should not have to: `--needed` is a no-op when the module
+    // is already installed, which is the usual case — it was installed with
+    // omavcam and has not been loaded since.
+    if find_node().is_err() {
+        missing.push(Missing {
+            what: "the virtual camera".to_string(),
+            install: "sudo pacman -S --needed v4l2loopback-dkms && sudo modprobe v4l2loopback"
+                .to_string(),
+        });
+    }
+    missing
+}
+
+/// Whether PATH holds something executable by that name — the same lookup the
+/// spawn would do, done before there is anything to lose by failing.
+fn on_path(tool: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| {
+            fs::metadata(dir.join(tool))
+                .is_ok_and(|file| file.is_file() && file.permissions().mode() & 0o111 != 0)
+        })
+    })
 }
 
 /// Set the controls that decide what a watching application sees when frames

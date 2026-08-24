@@ -1,0 +1,70 @@
+# Maintainer: Sphiment <sphiment@gmail.com>
+#
+# The engine ships as an AUR `-git` package because Omarchy installs plugins by
+# cloning them with no build step, so a compiled binary cannot live inside the
+# plugin. Building on the user's machine is the accepted cost of a compiled
+# engine; the bar widget still installs with `omarchy plugin add`.
+#
+# This directory is the AUR repository's contents: PKGBUILD and omavcam.install.
+# Everything else comes from the clone.
+
+pkgname=omavcam-git
+pkgver=0.1.0.r0.g0000000
+pkgrel=1
+pkgdesc="Turn an Android phone into a webcam on Omarchy: the daemon and CLI behind the bar widget"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Sphiment/omavcam2"
+license=('MIT')
+# scrcpy captures and writes the node, adb finds and talks to the phone,
+# v4l2-ctl sets the node's controls, v4l2loopback is the node itself, and
+# hyprctl applies the preview's window rules before every capture starts.
+depends=('scrcpy' 'android-tools' 'v4l-utils' 'v4l2loopback-dkms' 'hyprland')
+makedepends=('git' 'cargo')
+provides=('omavcam')
+conflicts=('omavcam')
+install=omavcam.install
+source=("$pkgname::git+https://github.com/Sphiment/omavcam2.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$srcdir/$pkgname"
+  printf '%s.r%s.g%s' \
+    "$(awk -F'"' '/^version =/ {print $2; exit}' Cargo.toml)" \
+    "$(git rev-list --count HEAD)" \
+    "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd "$srcdir/$pkgname"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+}
+
+build() {
+  cd "$srcdir/$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+package() {
+  cd "$srcdir/$pkgname"
+  # One binary is both the daemon and the CLI, at the path omavcam.service names.
+  install -Dm755 target/release/omavcam "$pkgdir/usr/bin/omavcam"
+
+  install -Dm644 systemd/omavcam.socket "$pkgdir/usr/lib/systemd/user/omavcam.socket"
+  install -Dm644 systemd/omavcam.service "$pkgdir/usr/lib/systemd/user/omavcam.service"
+  # Enabled by shipping the symlink rather than by running systemctl: a user
+  # unit cannot be enabled for a user the package install has never met, and
+  # this way installing is the whole of the installation and uninstalling
+  # removes it again. Connecting to the socket is what starts the daemon.
+  install -d "$pkgdir/usr/lib/systemd/user/sockets.target.wants"
+  ln -s ../omavcam.socket "$pkgdir/usr/lib/systemd/user/sockets.target.wants/omavcam.socket"
+
+  # The daemon cannot do either of these: a `systemd --user` service has no
+  # capabilities at all, measured CapEff 0000000000000000 (ADR-0008).
+  install -Dm644 packaging/omavcam.modules-load.conf "$pkgdir/usr/lib/modules-load.d/omavcam.conf"
+  install -Dm644 packaging/omavcam.modprobe.conf "$pkgdir/usr/lib/modprobe.d/omavcam.conf"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

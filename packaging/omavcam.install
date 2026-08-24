@@ -1,0 +1,52 @@
+post_install() {
+  # A pacman scriptlet runs as root and cannot touch a user's systemd manager,
+  # so the two per-session steps are told, not done. A reboot does both.
+  cat <<'MSG'
+omavcam: the daemon is installed and its socket is enabled for every user.
+
+Reboot, and it is ready. Without rebooting, this session needs both halves
+picked up by hand:
+
+  1. The module:  sudo modprobe v4l2loopback
+  2. The socket:  systemctl --user daemon-reload &&
+                  systemctl --user start omavcam.socket
+
+Then add the bar widget and start a capture:
+
+  omarchy plugin add https://github.com/Sphiment/omavcam2.git --enable
+  omavcam start
+
+Nothing needs root again after this: the module is configured at install time
+because a `systemd --user` service cannot load one.
+MSG
+}
+
+post_upgrade() {
+  cat <<'MSG'
+omavcam: restart the daemon to run the new binary:
+  systemctl --user restart omavcam.socket omavcam.service
+If the module parameters changed, the new nodes appear after a reboot.
+MSG
+}
+
+post_remove() {
+  # The file that loads this module at boot goes with the package, so an
+  # uninstall should not leave it loaded either. v4l2loopback-dkms stays
+  # installed and is shared with other tools, so the unload is best effort:
+  # a module something is actually using has a non-zero refcount and
+  # `modprobe -r` refuses it, which is the behaviour we want.
+  # The units are gone with the package, but a session that already started
+  # them keeps its copies until it is told otherwise.
+  # `disable` would be wrong twice over: the enablement was a symlink in
+  # /usr/lib that went with the package, and omavcam.service has no [Install]
+  # at all — it exists to be socket-activated.
+  cat <<'MSG'
+omavcam: stop what is left of this login session with
+  systemctl --user stop omavcam.socket omavcam.service
+MSG
+  modprobe -r v4l2loopback 2>/dev/null || cat <<'MSG'
+omavcam: v4l2loopback is still loaded because something is using it, and was
+left alone. Nothing omavcam installed loads it any more; another package's
+configuration, if there is one, still will.
+MSG
+}

@@ -48,6 +48,9 @@ struct Daemon {
     /// The running scrcpy, if there is one. The state's `capture` is what this
     /// looks like to a client; the two are set together.
     capture: Option<Child>,
+    /// Where the preview was before it was hidden. Size stays on the same
+    /// scrcpy window, so only its position needs restoring.
+    preview_position: Option<[i64; 2]>,
 }
 
 type Shared = Arc<Mutex<Daemon>>;
@@ -184,8 +187,23 @@ fn publish_capture(shared: &Shared, capture: Option<Capture>) {
 
 /// Launch a capture against the connected phone. Returns the error code and
 /// message for a client, or nothing when it started.
-fn start_capture(shared: &Shared, stay_awake: bool) -> Result<(), (&'static str, String)> {
+fn start_capture(
+    shared: &Shared,
+    stay_awake: bool,
+    rounding: u64,
+    border_size: u64,
+) -> Result<(), (&'static str, String)> {
     let _turn = transition();
+    // scrcpy refuses --stay-awake with --no-control. The preview makes control
+    // non-negotiable, and owning an adb setting restore would be less robust
+    // than scrcpy's device-side restoration (issue #7).
+    if stay_awake {
+        return Err((
+            "preview_conflict",
+            "the preview requires scrcpy --no-control, which cannot be combined with --stay-awake; start without --stay-awake"
+                .to_string(),
+        ));
+    }
     // Answer from what is true now, not from whatever the last poll saw: the
     // phone may have gone, and the capture may already have died with it.
     if !refresh_connection_locked(shared) {
@@ -205,16 +223,20 @@ fn start_capture(shared: &Shared, stay_awake: bool) -> Result<(), (&'static str,
     let node = capture::find_node().map_err(|e| ("no_virtual_camera", e))?;
     capture::set_controls(&node);
 
-    match capture::spawn(&phone.serial, &node, stay_awake) {
+    match capture::spawn(&phone.serial, &node, rounding, border_size) {
         Ok(child) => {
-            shared.lock().unwrap().capture = Some(child);
+            let mut inner = shared.lock().unwrap();
+            inner.capture = Some(child);
+            inner.preview_position = None;
+            drop(inner);
             publish_capture(
                 shared,
                 Some(Capture {
                     phone,
                     node,
                     size: capture::SIZE.to_string(),
-                    stay_awake,
+                    stay_awake: false,
+                    preview: true,
                 }),
             );
             Ok(())
@@ -253,7 +275,11 @@ fn stop_capture(shared: &Shared) {
 }
 
 fn stop_capture_locked(shared: &Shared) {
-    let child = { shared.lock().unwrap().capture.take() };
+    let child = {
+        let mut inner = shared.lock().unwrap();
+        inner.preview_position = None;
+        inner.capture.take()
+    };
     if let Some(mut child) = child {
         let _ = child.kill();
         let _ = child.wait();
@@ -274,9 +300,57 @@ fn reap_capture_locked(shared: &Shared) {
         }
     };
     if exited {
-        shared.lock().unwrap().capture = None;
+        let mut inner = shared.lock().unwrap();
+        inner.capture = None;
+        inner.preview_position = None;
+        drop(inner);
         publish_capture(shared, None);
     }
+}
+
+fn set_preview(
+    shared: &Shared,
+    visible: bool,
+    rounding: u64,
+    border_size: u64,
+) -> Result<(), (&'static str, String)> {
+    let _turn = transition();
+    reap_capture_locked(shared);
+    let mut public = shared.lock().unwrap().state.capture.clone().ok_or((
+        "no_capture",
+        "start a capture before opening its preview".to_string(),
+    ))?;
+    capture::apply_preview_rule(rounding, border_size).map_err(|e| {
+        (
+            "preview_failed",
+            format!("could not theme the preview: {e}"),
+        )
+    })?;
+    if public.preview == visible {
+        return Ok(());
+    }
+
+    if visible {
+        let position = shared.lock().unwrap().preview_position;
+        match position {
+            Some(position) => capture::move_preview(position),
+            None => capture::center_preview(),
+        }
+        .map_err(|e| ("preview_failed", format!("could not show the preview: {e}")))?;
+    } else {
+        let position = capture::preview_position().map_err(|e| {
+            (
+                "preview_failed",
+                format!("could not locate the preview: {e}"),
+            )
+        })?;
+        capture::move_preview([-2000, -2000])
+            .map_err(|e| ("preview_failed", format!("could not hide the preview: {e}")))?;
+        shared.lock().unwrap().preview_position = Some(position);
+    }
+    public.preview = visible;
+    publish_capture(shared, Some(public));
+    Ok(())
 }
 
 /// Remember which phone is in use, so choosing is a one-time act.
@@ -397,6 +471,7 @@ pub fn run() -> std::io::Result<()> {
         registry: phones::load(&dir),
         state_dir: dir.clone(),
         capture: None,
+        preview_position: None,
     }));
     // The first client, especially the one that socket-activated us, must not
     // observe a placeholder NoPhone state and exit before the watcher runs.
@@ -545,16 +620,36 @@ fn handle(shared: &Shared, line: &[u8]) -> String {
                 Err((code, message)) => error_message(&id, current_rev(), code, &message),
             }
         }
-        Some("start") => match start_capture(
-            shared,
-            request
-                .get("stay_awake")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        ) {
-            Ok(()) => ok_message(&id, current_rev()),
-            Err((code, message)) => error_message(&id, current_rev(), code, &message),
-        },
+        Some("start") => {
+            let (rounding, border_size) = preview_style(&request);
+            match start_capture(
+                shared,
+                request
+                    .get("stay_awake")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                rounding,
+                border_size,
+            ) {
+                Ok(()) => ok_message(&id, current_rev()),
+                Err((code, message)) => error_message(&id, current_rev(), code, &message),
+            }
+        }
+        Some("preview") => {
+            let Some(visible) = request.get("visible").and_then(Value::as_bool) else {
+                return error_message(
+                    &id,
+                    current_rev(),
+                    "bad_request",
+                    "preview needs a boolean visible field",
+                );
+            };
+            let (rounding, border_size) = preview_style(&request);
+            match set_preview(shared, visible, rounding, border_size) {
+                Ok(()) => ok_message(&id, current_rev()),
+                Err((code, message)) => error_message(&id, current_rev(), code, &message),
+            }
+        }
         Some("stop") => {
             stop_capture(shared);
             ok_message(&id, current_rev())
@@ -566,4 +661,20 @@ fn handle(shared: &Shared, line: &[u8]) -> String {
             &format!("no such request kind: {other:?}"),
         ),
     }
+}
+
+/// Omarchy's live Style tokens arrive with preview requests. Clamp to the
+/// compositor's supported range before interpolating them into a Lua rule.
+fn preview_style(request: &Value) -> (u64, u64) {
+    let rounding = request
+        .get("rounding")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(20);
+    let border_size = request
+        .get("border_size")
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        .min(20);
+    (rounding, border_size)
 }

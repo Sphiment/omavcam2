@@ -42,9 +42,11 @@ Panel {
   // What the daemon last refused, in its own words. The panel shows it; the
   // bar does not, because a refused request is not a broken setup.
   property string refusal: ""
+  property bool previewStyleSynced: false
 
   readonly property bool linked: daemonSocket.connected && daemonState !== null
   readonly property bool capturing: !!(daemonState && daemonState.capture)
+  readonly property bool previewing: !!(capturing && daemonState.capture.preview)
   readonly property string connectionState: daemonState ? daemonState.connection.state : ""
 
   // What the bar has to warn about: something is wrong and only the person at
@@ -88,11 +90,11 @@ Panel {
 
   // ---- the daemon --------------------------------------------------------
 
-  function send(kind, serial) {
+  function send(kind, args) {
     if (!daemonSocket.connected || pending !== "") return
     refusal = ""
     var request = {"v": protocol, "id": String(nextId++), "kind": kind}
-    if (serial !== undefined) request.serial = serial
+    if (args) Object.keys(args).forEach(function(key) { request[key] = args[key] })
     pending = request.id
     daemonSocket.write(JSON.stringify(request) + "\n")
     daemonSocket.flush()
@@ -113,14 +115,37 @@ Panel {
     }
     if (message.type === "state") {
       daemonState = message.state
+      if (!capturing) previewStyleSynced = false
+      syncPreviewStyle()
     } else if (message.type === "response" && message.id === pending) {
       pending = ""
       refusal = message.ok ? "" : message.error.message
+      syncPreviewStyle()
     }
   }
 
   function toggleCapture() {
-    send(capturing ? "stop" : "start")
+    send(capturing ? "stop" : "start", capturing ? null : previewArgs(true))
+  }
+
+  function previewArgs(visible) {
+    return {
+      "visible": visible,
+      "rounding": Style.cornerRadius,
+      "border_size": Style.normalBorderWidth
+    }
+  }
+
+  function togglePreview() {
+    send("preview", previewArgs(!previewing))
+  }
+
+  // A shell restart reconnects to the same daemon and the same scrcpy window.
+  // Reapply the live tokens without owning any geometry or capture state here.
+  function syncPreviewStyle() {
+    if (!capturing || pending !== "" || previewStyleSynced) return
+    previewStyleSynced = true
+    send("preview", previewArgs(previewing))
   }
 
   // ---- what all that says ------------------------------------------------
@@ -181,6 +206,7 @@ Panel {
       } else {
         root.daemonState = null
         root.pending = ""
+        root.previewStyleSynced = false
       }
     }
   }
@@ -277,6 +303,18 @@ Panel {
           onClicked: root.toggleCapture()
         }
 
+        Toggle {
+          width: parent.width
+          label: "Preview"
+          description: root.capturing ? (root.previewing ? "Visible" : "Hidden") : "Start a capture first"
+          checked: root.previewing
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          enabled: root.linked && root.capturing
+          opacity: enabled ? 1 : 0.5
+          onClicked: root.togglePreview()
+        }
+
         // ---------- the picker, only while there is a choice ----------
         Column {
           width: parent.width
@@ -322,7 +360,7 @@ Panel {
               foreground: root.foreground
               fontFamily: root.fontFamily
               tooltipText: modelData.phone.serial
-              onClicked: root.send("select", modelData.phone.serial)
+              onClicked: root.send("select", {"serial": modelData.phone.serial})
             }
           }
         }

@@ -87,6 +87,7 @@ impl Fixture {
                         self.dir.join("sys").display()
                     ),
                     "--setenv=OMAVCAM_STARTUP_MS=500".to_string(),
+                    "--setenv=OMAVCAM_PREVIEW_MS=500".to_string(),
                     "--setenv=OMAVCAM_COMMAND_MS=100".to_string(),
                     format!("--setenv=OMAVCAM_POLL_MS={}", self.poll_ms),
                 ])
@@ -115,7 +116,7 @@ impl Fixture {
         fs::create_dir_all(dir.join("state")).unwrap();
 
         let stub = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/stub");
-        for tool in ["adb", "scrcpy", "v4l2-ctl", "modprobe"] {
+        for tool in ["adb", "scrcpy", "v4l2-ctl", "modprobe", "hyprctl"] {
             fs::copy(&stub, bin_dir.join(tool)).unwrap();
         }
 
@@ -130,6 +131,7 @@ impl Fixture {
         };
         fs::write(&fixture.log, "").unwrap();
         fixture.script_virtual_camera(Some("video42"));
+        fixture.script_preview_window([120, 80]);
         fixture
     }
 
@@ -162,6 +164,7 @@ impl Fixture {
             .env("OMAVCAM_STUB_DIR", &self.stub_dir)
             .env("OMAVCAM_V4L2_DIR", self.dir.join("sys"))
             .env("OMAVCAM_STARTUP_MS", "500")
+            .env("OMAVCAM_PREVIEW_MS", "500")
             .env("OMAVCAM_COMMAND_MS", "100")
             // The daemon polls adb for attached phones; tests should not wait a
             // real second for a plug or an unplug to be noticed.
@@ -305,6 +308,21 @@ impl Fixture {
             out.push_str(" transport_id:1\n");
         }
         fs::write(self.stub_dir.join("adb.out"), out).unwrap();
+    }
+
+    pub fn script_preview_window(&self, at: [i64; 2]) {
+        fs::write(
+            self.stub_dir.join("hyprctl.clients.out"),
+            json!([{
+                "title": "omavcam preview",
+                "at": at,
+                "size": [640, 360],
+                "floating": true,
+                "pinned": true,
+            }])
+            .to_string(),
+        )
+        .unwrap();
     }
 }
 

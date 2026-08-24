@@ -449,6 +449,104 @@ fn a_paired_phone_with_a_changed_port_is_unreachable_then_reconnected_without_pa
 }
 
 #[test]
+fn the_current_connect_address_is_an_idempotent_no_op() {
+    let f = Fixture::slow_poll();
+    let mut client = f.connect();
+    f.script_hold("scrcpy");
+    f.script_output_for("adb", "pair", "Successfully paired\n");
+    f.script_output_for("adb", "connect", "connected\n");
+    f.script_output_for("adb", "shell", &format!("{STABLE_ID}\n"));
+    f.script_devices(&[(CONNECT_ADDRESS, "device", Some("Pixel_7"))]);
+    assert_eq!(
+        client.request_with(
+            "pair",
+            json!({
+                "pair_address": PAIR_ADDRESS,
+                "code": CODE,
+                "connect_address": CONNECT_ADDRESS,
+            }),
+        )["ok"],
+        json!(true)
+    );
+    assert_eq!(client.request("start")["ok"], json!(true));
+    let before_calls = f.argv();
+    let before_rev = client.last_state["rev"].clone();
+    f.script_exit_for("adb", "shell", 1);
+
+    let response = client.request_with(
+        "connect",
+        json!({"serial": CONNECT_ADDRESS, "connect_address": CONNECT_ADDRESS}),
+    );
+
+    assert_eq!(response["ok"], json!(true), "{response}");
+    assert_eq!(response["rev"], before_rev);
+    assert_eq!(f.argv(), before_calls);
+    assert_eq!(client.state()["connection"]["state"], json!("connected"));
+    assert_eq!(
+        client.state()["capture"]["phone"]["serial"],
+        json!(CONNECT_ADDRESS)
+    );
+}
+
+
+#[test]
+fn a_rejected_new_address_is_disconnected_after_post_connect_failures() {
+    let f = Fixture::slow_poll();
+    let mut client = f.connect();
+    f.script_hold("scrcpy");
+    f.script_output_for("adb", "pair", "Successfully paired\n");
+    f.script_output_for("adb", "connect", "connected\n");
+    f.script_output_for("adb", "shell", &format!("{STABLE_ID}\n"));
+    f.script_devices(&[(CONNECT_ADDRESS, "device", Some("Pixel_7"))]);
+    assert_eq!(
+        client.request_with(
+            "pair",
+            json!({
+                "pair_address": PAIR_ADDRESS,
+                "code": CODE,
+                "connect_address": CONNECT_ADDRESS,
+            }),
+        )["ok"],
+        json!(true)
+    );
+    assert_eq!(client.request("start")["ok"], json!(true));
+
+    f.script_devices_on_connect(&[(NEW_CONNECT_ADDRESS, "device", Some("Pixel_7"))]);
+    f.script_exit_for("adb", "devices", 1);
+    let scan_failed = client.request_with(
+        "connect",
+        json!({"serial": CONNECT_ADDRESS, "connect_address": NEW_CONNECT_ADDRESS}),
+    );
+    assert_eq!(scan_failed["error"]["code"], json!("adb_unavailable"));
+
+    f.script_exit_for("adb", "devices", 0);
+    f.script_devices_on_connect(&[(NEW_CONNECT_ADDRESS, "offline", Some("Pixel_7"))]);
+    let unusable = client.request_with(
+        "connect",
+        json!({"serial": CONNECT_ADDRESS, "connect_address": NEW_CONNECT_ADDRESS}),
+    );
+    assert_eq!(unusable["error"]["code"], json!("unreachable"));
+
+    assert_eq!(
+        f.argv()
+            .iter()
+            .filter(|call| call == &&format!("adb disconnect {NEW_CONNECT_ADDRESS}"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        client.state()["known"][0]["connect_address"],
+        json!(CONNECT_ADDRESS)
+    );
+    assert_eq!(client.state()["attached"], json!([]));
+    assert_eq!(
+        client.state()["capture"]["phone"]["serial"],
+        json!(CONNECT_ADDRESS)
+    );
+}
+
+
+#[test]
 fn a_changed_wireless_port_retargets_the_same_logical_capture() {
     let f = Fixture::slow_poll();
     let mut client = f.connect();
@@ -503,6 +601,7 @@ fn a_changed_wireless_port_retargets_the_same_logical_capture() {
         1
     );
 }
+
 
 #[test]
 fn a_changed_port_cannot_retarget_capture_to_a_different_phone_while_reconnecting() {

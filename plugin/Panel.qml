@@ -45,7 +45,9 @@ Panel {
   readonly property int previewRounding: Style.cornerRadius
   readonly property int previewBorderSize: Style.normalBorderWidth
 
-  readonly property bool linked: daemonSocket.connected && daemonState !== null
+  // The socket is rebuilt to reconnect, so it is null for a moment each time.
+  readonly property bool socketUp: link.item !== null && link.item.connected
+  readonly property bool linked: socketUp && daemonState !== null
   readonly property bool capturing: !!(daemonState && daemonState.capture)
   readonly property bool previewing: !!(capturing && daemonState.capture.preview)
   readonly property string connectionState: daemonState ? daemonState.connection.state : ""
@@ -113,13 +115,13 @@ Panel {
   // ---- the daemon --------------------------------------------------------
 
   function send(kind, args) {
-    if (!daemonSocket.connected || pending !== "") return
+    if (!root.socketUp || pending !== "") return
     refusal = ""
     var request = {"v": protocol, "id": String(nextId++), "kind": kind}
     if (args) Object.keys(args).forEach(function(key) { request[key] = args[key] })
     pending = request.id
-    daemonSocket.write(JSON.stringify(request) + "\n")
-    daemonSocket.flush()
+    link.item.write(JSON.stringify(request) + "\n")
+    link.item.flush()
   }
 
   function receive(line) {
@@ -176,7 +178,7 @@ Panel {
   // ---- what all that says ------------------------------------------------
 
   function connectionWords() {
-    if (!daemonSocket.connected) return "Daemon unreachable"
+    if (!root.socketUp) return "Daemon unreachable"
     if (!daemonState) return "Waiting for the daemon"
     if (!daemonState.adb_ok) return "adb unavailable"
     var connection = daemonState.connection
@@ -217,31 +219,38 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  Socket {
-    id: daemonSocket
-    // Connecting is what socket-activates the daemon, so the widget holds the
-    // link open whether the panel is showing or not — the bar has to know
-    // about a capture nobody started from here.
-    connected: true
-    path: Quickshell.env("OMAVCAM_SOCKET")
-      || (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/omavcam.sock"
+  // A Socket that has failed to dial is spent: `connected` reads false but
+  // writing it true again does nothing and never reaches the listener. So
+  // reconnecting means building a new one, which is why the socket lives in a
+  // Loader instead of standing on its own.
+  Loader {
+    id: link
+    active: true
+    sourceComponent: Socket {
+      // Connecting is what socket-activates the daemon, so the widget holds
+      // the link open whether the panel is showing or not — the bar has to
+      // know about a capture nobody started from here.
+      connected: true
+      path: Quickshell.env("OMAVCAM_SOCKET")
+        || (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/omavcam.sock"
 
-    parser: SplitParser {
-      splitMarker: "\n"
-      onRead: function(line) { root.receive(line) }
-    }
+      parser: SplitParser {
+        splitMarker: "\n"
+        onRead: function(line) { root.receive(line) }
+      }
 
-    onError: root.unreachable = true
+      onError: root.unreachable = true
 
-    // A daemon that goes away leaves nothing to render and no answer coming.
-    // Forgetting both is what keeps the widget from wedging.
-    onConnectionStateChanged: {
-      if (connected) {
-        root.unreachable = false
-        retry.interval = retry.firstInterval
-      } else {
-        root.daemonState = null
-        root.pending = ""
+      // A daemon that goes away leaves nothing to render and no answer coming.
+      // Forgetting both is what keeps the widget from wedging.
+      onConnectionStateChanged: {
+        if (connected) {
+          root.unreachable = false
+          retry.interval = retry.firstInterval
+        } else {
+          root.daemonState = null
+          root.pending = ""
+        }
       }
     }
   }
@@ -255,9 +264,10 @@ Panel {
     readonly property int firstInterval: 2000
     interval: firstInterval
     repeat: true
-    running: !daemonSocket.connected
+    running: !root.socketUp
     onTriggered: {
-      daemonSocket.connected = true
+      link.active = false
+      link.active = true
       interval = Math.min(interval * 2, 30000)
     }
   }

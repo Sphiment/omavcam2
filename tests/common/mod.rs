@@ -9,6 +9,7 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -328,6 +329,34 @@ impl Fixture {
             fs::create_dir_all(&fd).unwrap();
             std::os::unix::fs::symlink("/dev/video42", fd.join("3")).unwrap();
         }
+    }
+
+    pub fn script_unknown_consumer(&self, uncertain: bool) {
+        let process = self.dir.join("proc/998");
+        let fd = process.join("fd");
+        if fd.exists() {
+            fs::set_permissions(&fd, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let _ = fs::remove_dir_all(&process);
+        if uncertain {
+            fs::create_dir_all(&fd).unwrap();
+            fs::set_permissions(fd, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+    }
+
+    pub fn script_unknown_consumer_link(&self) {
+        self.script_unknown_consumer(false);
+        let fd = self.dir.join("proc/998/fd");
+        fs::create_dir_all(&fd).unwrap();
+        fs::write(fd.join("3"), "not a symlink").unwrap();
+    }
+
+    pub fn script_registry_writable(&self, writable: bool) {
+        fs::set_permissions(
+            self.dir.join("state"),
+            fs::Permissions::from_mode(if writable { 0o700 } else { 0o500 }),
+        )
+        .unwrap();
     }
 
     /// What `adb devices -l` prints from now on: one `(serial, adb's word for

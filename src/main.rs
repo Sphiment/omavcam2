@@ -164,8 +164,29 @@ fn render(state: &State) -> String {
         || "settings: unavailable".to_string(),
         |settings| {
             let pending = &settings.pending;
+            let lenses = settings
+                .lenses
+                .iter()
+                .map(|lens| {
+                    format!(
+                        "  lens {}: {}, sensor {}; resolutions: {}; fps: {}; zoom: {}..{}",
+                        lens.id,
+                        lens.facing,
+                        lens.sensor_size,
+                        lens.resolutions.join(", "),
+                        lens.frame_rates
+                            .iter()
+                            .map(u32::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        lens.zoom_min,
+                        lens.zoom_max
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             format!(
-                "settings: lens {}, {}, {}fps, {}, zoom {}{}{}",
+                "settings: lens {}, {}, {}fps, {}, zoom {}{}{}\nlenses:\n{}\n  offered for lens {} at {}: {}",
                 pending.lens,
                 pending.resolution,
                 pending.frame_rate,
@@ -180,7 +201,11 @@ fn render(state: &State) -> String {
                     .rejected
                     .as_ref()
                     .map(|message| format!("\nrejected: {message}"))
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                lenses,
+                pending.lens,
+                pending.aspect_ratio,
+                settings.offered_resolutions.join(", ")
             )
         },
     );

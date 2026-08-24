@@ -3,6 +3,7 @@
 //! node is, how it must be configured, and what scrcpy is launched with.
 
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -206,25 +207,96 @@ pub fn spawn(
 pub fn has_consumer(node: &str, writer_pid: u32) -> std::io::Result<bool> {
     // ponytail: a /proc scan on the rare size-changing Apply; track fd events
     // only if machines with thousands of processes make this measurable.
-    let proc = std::env::var("OMAVCAM_PROC_DIR").unwrap_or_else(|_| "/proc".into());
-    Ok(fs::read_dir(proc)?.filter_map(Result::ok).any(|process| {
-        process
-            .file_name()
-            .to_string_lossy()
-            .parse::<u32>()
-            .ok()
-            .is_some_and(|pid| {
-                pid != writer_pid
-                    && fs::read_dir(process.path().join("fd"))
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Result::ok)
-                        .any(|fd| {
-                            fs::read_link(fd.path())
-                                .is_ok_and(|target| target == std::path::Path::new(node))
-                        })
-            })
-    }))
+    let proc = PathBuf::from(std::env::var("OMAVCAM_PROC_DIR").unwrap_or_else(|_| "/proc".into()));
+    let uid = fs::metadata("/proc/self")?.uid();
+    let mut uncertain = false;
+    for process in fs::read_dir(&proc)? {
+        let process = match process {
+            Ok(process) => process,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                uncertain = true;
+                continue;
+            }
+        };
+        let Some(pid) = process.file_name().to_string_lossy().parse::<u32>().ok() else {
+            continue;
+        };
+        if pid == writer_pid {
+            continue;
+        }
+        let metadata = match process.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                uncertain = true;
+                continue;
+            }
+        };
+        // Other users cannot open this logind-owned camera. An unreadable
+        // same-user fd directory, however, is uncertainty and must fail closed.
+        if metadata.uid() != uid {
+            continue;
+        }
+        let fd_path = process.path().join("fd");
+        let fds = match fs::read_dir(&fd_path) {
+            Ok(fds) => fds,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                uncertain = true;
+                continue;
+            }
+        };
+        for fd in fds {
+            let fd = match fd {
+                Ok(fd) => fd,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    uncertain = true;
+                    continue;
+                }
+            };
+            match fs::read_link(fd.path()) {
+                Ok(target) if target == std::path::Path::new(node) => return Ok(true),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => uncertain = true,
+            }
+        }
+    }
+    if !uncertain {
+        return Ok(false);
+    }
+
+    // Some same-user sandbox processes deliberately hide their fd directory.
+    // Ask the device whether a second reader can allocate buffers so those
+    // unrelated processes do not block Apply; any inconclusive answer remains
+    // an error rather than becoming "no consumer".
+    let mut process = Command::new("v4l2-ctl");
+    process.args([
+        "-d",
+        node,
+        "--stream-mmap",
+        "--stream-count=1",
+        "--stream-poll",
+    ]);
+    let output = command::output(process)?;
+    if output.status.success() {
+        return Ok(false);
+    }
+    let error = String::from_utf8_lossy(&output.stderr);
+    if error.contains("Device or resource busy") {
+        return Ok(true);
+    }
+    let detail = if error.trim().is_empty() {
+        String::new()
+    } else {
+        format!(": {}", error.trim())
+    };
+    Err(std::io::Error::other(format!(
+        "v4l2-ctl could not resolve unreadable process state ({}){detail}",
+        output.status
+    )))
 }
 
 fn node_is_capture(node: &str) -> std::io::Result<bool> {

@@ -122,6 +122,7 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
                 adb_ok: false,
                 connection: Connection::NoPhone,
                 attached: Vec::new(),
+                settings: None,
                 ..shared.lock().unwrap().state.clone()
             };
             publish(shared, state);
@@ -175,11 +176,22 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
 }
 
 fn publish_connection(shared: &Shared, connection: Connection, attached: Vec<protocol::Attached>) {
+    let current = shared.lock().unwrap().state.clone();
+    let serial = match &connection {
+        Connection::Unauthorised { phone }
+        | Connection::Connecting { phone }
+        | Connection::Connected { phone } => Some(phone.serial.as_str()),
+        Connection::NoPhone | Connection::Unselected { .. } => None,
+    };
+    let settings = current
+        .settings
+        .filter(|settings| Some(settings.phone.as_str()) == serial);
     let state = State {
         adb_ok: true,
         connection,
         attached,
-        ..shared.lock().unwrap().state.clone()
+        settings,
+        ..current
     };
     publish(shared, state);
 }
@@ -385,6 +397,7 @@ fn refresh_adb(shared: &Shared) -> bool {
             adb_ok: false,
             connection: Connection::NoPhone,
             attached: Vec::new(),
+            settings: None,
             ..shared.lock().unwrap().state.clone()
         };
         publish(shared, state);
@@ -530,8 +543,8 @@ fn apply_settings(shared: &Shared) -> Result<(), (&'static str, String)> {
     let pending = view.pending.clone();
     persist_settings(shared, &phone.serial, pending.clone()).map_err(|error| {
         (
-            "settings_not_saved",
-            format!("could not save settings: {error}"),
+            "apply_failed",
+            format!("could not Apply the pending settings: {error}"),
         )
     })?;
 
@@ -581,7 +594,7 @@ fn apply_settings(shared: &Shared) -> Result<(), (&'static str, String)> {
                     shared.lock().unwrap().capture = Some(child);
                     let message = match persistence_error {
                         Some(ref error) => format!(
-                            "scrcpy rejected {rejected}; previous capture restarted, but its settings could not be restored on disk: {error}"
+                            "scrcpy rejected {rejected}; previous capture restarted, but the prior applied settings could not be restored to the registry: {error}"
                         ),
                         None => format!("scrcpy rejected {rejected}; previous capture restarted"),
                     };

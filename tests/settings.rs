@@ -75,6 +75,134 @@ fn malformed_camera_dimensions_are_reported_without_killing_the_daemon() {
 }
 
 #[test]
+fn every_malformed_camera_characteristic_is_rejected() {
+    for capabilities in [
+        "--camera-id=0 (, 4080x3060, fps={30}, zoom-range=[1, 8])\n  - 1280x720\n",
+        "--camera-id=0 (back, 4080x3060, fps={0}, zoom-range=[1, 8])\n  - 1280x720\n",
+        "--camera-id=0 (back, 4080x3060, fps={30}, zoom-range=[NaN, 8])\n  - 1280x720\n",
+        "--camera-id=0 (back, 4080x3060, fps={30}, zoom-range=[8, 1])\n  - 1280x720\n",
+        "--camera-id=0 (back, 4080x3060, fps={30}, zoom-range=[-1, 8])\n  - 1280x720\n",
+        "--camera-id=0 (back, 1x1, fps={30}, zoom-range=[1, 8])\n  - 1x1\n",
+    ] {
+        let f = Fixture::start();
+        f.script_camera_capabilities(capabilities);
+        f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
+        let mut client = f.connect();
+        client.await_state("connected phone", |state| {
+            state["connection"]["state"] == json!("connected")
+        });
+        assert!(
+            client.state()["settings"].is_null(),
+            "accepted malformed capabilities: {capabilities}"
+        );
+        assert_eq!(client.request("status")["ok"], json!(true));
+    }
+}
+
+#[test]
+fn cli_status_lists_the_camera_choices() {
+    let (f, _client) = ready();
+
+    let output = f.cli(&["status"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+
+    assert!(output.status.success(), "{stdout}");
+    for choice in [
+        "lens 0: back, sensor 4080x3060",
+        "resolutions: 1920x1080, 1280x720, 640x480",
+        "fps: 15, 20, 24, 30",
+        "zoom: 1..8",
+        "lens 1: front, sensor 3264x2448",
+        "offered for lens 0 at 16:9: 1920x1080, 1280x720",
+    ] {
+        assert!(stdout.contains(choice), "missing {choice:?}:\n{stdout}");
+    }
+}
+
+#[test]
+fn settings_are_cleared_when_the_phone_disappears() {
+    let (f, mut client) = ready();
+
+    f.script_devices(&[]);
+    let state = client.await_state("no phone", |state| {
+        state["connection"]["state"] == json!("no_phone")
+    });
+
+    assert!(state["settings"].is_null(), "{state}");
+}
+
+#[test]
+fn a_new_phone_never_inherits_old_settings_when_its_probe_fails() {
+    let (f, mut client) = ready();
+    f.script_devices(&[
+        (PIXEL, "device", Some("Pixel_7")),
+        (GALAXY, "device", Some("Galaxy_S21")),
+    ]);
+    f.script_camera_capabilities(
+        "--camera-id=0 (back, 0x0, fps={30}, zoom-range=[1, 8])\n  - 0x0\n",
+    );
+
+    let response = client.request_with("select", json!({"serial": GALAXY}));
+
+    assert_eq!(response["ok"], json!(true), "{response}");
+    assert_eq!(
+        client.state()["connection"]["phone"]["serial"],
+        json!(GALAXY)
+    );
+    assert!(client.state()["settings"].is_null(), "{}", client.state());
+}
+
+#[test]
+fn uncertain_consumer_detection_refuses_a_size_change() {
+    let (f, mut client) = ready();
+    client.request("start");
+    client.await_state("capture", |state| !state["capture"].is_null());
+    f.await_argv("scrcpy", 1);
+    f.script_unknown_consumer(true);
+    f.script_exit("v4l2-ctl", 2);
+    set(&mut client, "resolution", json!("1920x1080"));
+
+    let response = client.request("apply");
+
+    f.script_unknown_consumer(false);
+    f.script_exit("v4l2-ctl", 0);
+    assert_eq!(response["error"]["code"], json!("consumer_check_failed"));
+    assert!(response["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("could not inspect"));
+    assert_eq!(f.await_argv("scrcpy", 1).len(), 1, "capture was untouched");
+
+    f.script_unknown_consumer_link();
+    f.script_exit("v4l2-ctl", 2);
+    let response = client.request("apply");
+    f.script_unknown_consumer(false);
+    f.script_exit("v4l2-ctl", 0);
+    assert_eq!(response["error"]["code"], json!("consumer_check_failed"));
+    assert_eq!(f.await_argv("scrcpy", 1).len(), 1, "capture was untouched");
+
+    f.script_unknown_consumer(true);
+    assert_eq!(client.request("apply")["ok"], json!(true));
+    f.script_unknown_consumer(false);
+    assert_eq!(f.await_argv("scrcpy", 2).len(), 2, "free camera was proven");
+}
+
+#[test]
+fn persistence_failure_uses_apply_vocabulary() {
+    let (f, mut client) = ready();
+    set(&mut client, "zoom", json!(2.0));
+    f.script_registry_writable(false);
+
+    let response = client.request("apply");
+
+    f.script_registry_writable(true);
+    assert_eq!(response["error"]["code"], json!("apply_failed"));
+    let message = response["error"]["message"].as_str().unwrap();
+    assert!(message.contains("Apply"), "{message}");
+    assert!(!message.contains("save settings"), "{message}");
+}
+
+#[test]
 fn changes_are_pending_until_applied_and_discard_leaves_capture_alone() {
     let (f, mut client) = ready();
     client.request("start");

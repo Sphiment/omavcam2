@@ -1,12 +1,13 @@
 # Maintainer: Sphiment <sphiment@gmail.com>
 #
-# The engine ships as an AUR `-git` package because Omarchy installs plugins by
+# The engine ships as an Arch package because Omarchy installs plugins by
 # cloning them with no build step, so a compiled binary cannot live inside the
-# plugin. Building on the user's machine is the accepted cost of a compiled
-# engine; the bar widget still installs with `omarchy plugin add`.
+# plugin. The bar widget still installs with `omarchy plugin add`.
 #
-# This directory is the AUR repository's contents: PKGBUILD and omavcam.install.
-# Everything else comes from the clone.
+# CI builds this on every push and attaches it to a release, so nobody has to
+# compile omavcam to use it (.github/workflows/package.yml). The AUR is closed
+# to new submissions; this is an AUR-shaped package waiting for it to reopen,
+# which is why it is a `-git` package that clones rather than a source tarball.
 
 pkgname=omavcam-git
 pkgver=0.1.0.r0.g0000000
@@ -22,8 +23,17 @@ depends=('scrcpy' 'android-tools' 'v4l-utils' 'v4l2loopback-dkms' 'hyprland')
 makedepends=('git' 'cargo')
 provides=('omavcam')
 conflicts=('omavcam')
+# No separate -debug package. makepkg's default splits the symbols out into a
+# second package, which leaves the build with two files where the release
+# publishes one, and debug symbols for the engine belong in a local build
+# rather than in everyone's download.
+options=('!debug')
 install=omavcam.install
-source=("$pkgname::git+https://github.com/Sphiment/omavcam2.git")
+# What makepkg clones. CI overrides it to build the exact commit it checked
+# out, so a released package is the tag and not whatever HEAD had drifted to;
+# left alone it is this repository, which is what a person running makepkg
+# wants.
+source=("$pkgname::${OMAVCAM_SOURCE:-git+https://github.com/Sphiment/omavcam2.git}")
 sha256sums=('SKIP')
 
 pkgver() {

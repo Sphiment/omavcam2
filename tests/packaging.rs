@@ -183,6 +183,28 @@ fn uninstalling_leaves_no_loaded_module_behind() {
     );
 }
 
+/// The install command in the README is a URL, and the file it names is
+/// uploaded under a fixed name by the workflow. Nothing else keeps those two
+/// spellings together, and a mismatch is a 404 for everyone installing.
+#[test]
+fn the_readme_installs_the_asset_the_workflow_publishes() {
+    let asset = "omavcam-git-x86_64.pkg.tar.zst";
+    let workflow = fs::read_to_string(repo().join(".github/workflows/package.yml"))
+        .expect(".github/workflows/package.yml");
+    let readme = fs::read_to_string(repo().join("README.md")).expect("README.md");
+
+    assert!(
+        workflow.contains(&format!(
+            "gh release upload \"$GITHUB_REF_NAME\" \"out/{asset}\""
+        )),
+        "the workflow uploads {asset}"
+    );
+    assert!(
+        readme.contains(&format!("releases/latest/download/{asset}")),
+        "the README installs the asset the workflow publishes"
+    );
+}
+
 /// A tool that is not installed is named, with the package that supplies it,
 /// before anything has been asked to fail. This is what a client turns into an
 /// offer to install.

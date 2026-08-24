@@ -21,12 +21,11 @@ pub const CARD_LABEL: &str = "omavcam";
 /// scrcpy's window is the preview. Its title is the stable selector shared by
 /// every rule and compositor operation.
 pub const PREVIEW_TITLE: &str = "omavcam preview";
+const RECONNECT_TITLE: &str = "omavcam reconnecting";
 
 const PREVIEW_SELECTOR: &str = "title:^(omavcam preview)$";
-/// How long the node keeps delivering frames after its writer stops. Enough
-/// that an application which times out on stalled input keeps its camera when
-/// a capture is restarted.
-const TIMEOUT_MS: u32 = 1000;
+const RECONNECT_SELECTOR: &str = "title:^(omavcam reconnecting)$";
+const PREVIEW_WIDTH: u32 = 640;
 
 /// Where the kernel lists video devices. Overridable so tests can hand the
 /// daemon a directory of their own.
@@ -75,15 +74,13 @@ pub fn find_node() -> Result<String, String> {
 }
 
 /// Set the controls that decide what a watching application sees when frames
-/// stop: let its open consumer pin the format, and keep delivering frames after
-/// the writer is gone (ADR-0010). Best effort — the capture works without them,
-/// it just survives a restart less gracefully.
+/// stop: let its open consumer pin the format, and repeat the last real frame
+/// after the writer is gone (ADR-0010). Best effort — the capture works without
+/// them, it just survives a restart less gracefully.
 ///
 // ponytail: v4l2-ctl rather than the ioctls it wraps, which would mean libc and
 // a hand-written v4l2_ext_control. These are per-device V4L2 controls, not
-// module parameters, so an ordinary user can set them. `timeout_image_io` is
-// left alone: it loads a still into the timeout buffer, and there is no still
-// to load until the last-frame ticket.
+// module parameters, so an ordinary user can set them.
 pub fn set_controls(node: &str) {
     // An open consumer pins the format by itself. Leaving keep_format at 1
     // would also pin it while nobody is watching, making #9's permitted size
@@ -92,9 +89,11 @@ pub fn set_controls(node: &str) {
     // 640x480 BGR4 default, scrcpy's 1280x720 never takes, and the node feeds
     // 640x480 while the state claims 720p. With it at 0 the same run gives
     // 1280x720 YU12.
-    let controls = format!("keep_format=0,sustain_framerate=1,timeout={TIMEOUT_MS}");
+    // `sustain_framerate` rereads the last queued frame. A non-zero `timeout`
+    // would replace it with v4l2loopback's black timeout buffer instead.
+    let controls = "keep_format=0,sustain_framerate=1,timeout=0";
     let mut process = Command::new("v4l2-ctl");
-    process.args(["-d", node, "-c", &controls]);
+    process.args(["-d", node, "-c", controls]);
     match command::status(process) {
         Ok(status) if status.success() => {}
         Ok(status) => eprintln!(
@@ -115,26 +114,19 @@ pub fn set_controls(node: &str) {
 /// Launch one process that writes the virtual camera and draws its own preview.
 /// Control is always off, or that window forwards input to the phone.
 ///
-pub fn spawn(
-    serial: &str,
-    node: &str,
-    settings: &CameraSettings,
-    rounding: u64,
-    border_size: u64,
-) -> std::io::Result<Child> {
+pub fn spawn(serial: &str, node: &str, settings: &CameraSettings) -> std::io::Result<Child> {
     if node_is_capture(node)? {
         return Err(std::io::Error::new(
             std::io::ErrorKind::AddrInUse,
             format!("{node} already has a producer"),
         ));
     }
-    apply_preview_rule(rounding, border_size)?;
     let output_size = settings::output_size(settings);
     let (width, height) = output_size
         .split_once('x')
         .and_then(|(width, height)| Some((width.parse::<u32>().ok()?, height.parse::<u32>().ok()?)))
         .ok_or_else(|| std::io::Error::other(format!("invalid output size {output_size}")))?;
-    let window_width = 640;
+    let window_width = PREVIEW_WIDTH;
     let window_height = (window_width * height / width).max(1);
     let mut process = Command::new("scrcpy");
     process.args([
@@ -201,7 +193,7 @@ pub fn spawn(
         thread::sleep(Duration::from_millis(25));
     }
 
-    if let Err(e) = wait_for_preview().and_then(|()| center_preview()) {
+    if let Err(e) = wait_for_preview() {
         let _ = child.kill();
         let _ = child.wait();
         return Err(e);
@@ -209,18 +201,60 @@ pub fn spawn(
     Ok(child)
 }
 
-/// Apply before the window maps, so it never flashes tiled or takes focus.
-/// Reapplying the named rule updates theme values on a window already open.
-pub fn apply_preview_rule(rounding: u64, border_size: u64) -> std::io::Result<()> {
+/// Apply before the window maps, so it never flashes tiled, misplaced, or
+/// focused. Placement belongs to the compositor: SDL3 ignores client window
+/// coordinates under native Wayland.
+pub fn apply_preview_rule(
+    rounding: u64,
+    border_size: u64,
+    position: Option<[i64; 2]>,
+) -> std::io::Result<()> {
+    let placement = position.map_or_else(
+        || "center = true".to_string(),
+        |[x, y]| format!("move = {{ {x}, {y} }}"),
+    );
+    apply_preview_rule_with(rounding, border_size, Some(&placement))
+}
+
+/// Reapply live theme values without moving an existing preview.
+pub fn apply_preview_style(rounding: u64, border_size: u64) -> std::io::Result<()> {
+    apply_preview_rule_with(rounding, border_size, None)
+}
+
+fn apply_preview_rule_with(
+    rounding: u64,
+    border_size: u64,
+    placement: Option<&str>,
+) -> std::io::Result<()> {
     // Hyprland's only close guard is measured in milliseconds and stored as a
-    // signed int. Its maximum keeps the capture safe for just under 25 days.
-    // ponytail: replace this with an indefinite compositor primitive if one is
-    // added; owning an adb power-setting restore is a larger failure mode.
+    // signed int. Its maximum protects a continuously open preview for just
+    // under 25 days; reapplying the live style rearms it.
+    // ponytail: replace this ceiling if Hyprland adds an indefinite guard.
+    let placement = placement.map_or(String::new(), |placement| format!("{placement}, "));
     let rule = format!(
-        "o.window({{ title = \"^(omavcam preview)$\" }}, \
+        "o.window({{ title = \"^({PREVIEW_TITLE})$\" }}, \
          {{ name = \"omavcam-preview\", float = true, pin = true, no_dim = true, \
          no_focus = true, no_initial_focus = true, keep_aspect_ratio = true, \
-         no_close_for = 2147483647, rounding = {rounding}, border_size = {border_size}, \
+         {placement}no_close_for = 2147483647, rounding = {rounding}, border_size = {border_size}, \
+         opacity = \"1 1\", tag = \"-default-opacity\" }})"
+    );
+    hyprctl(&["eval", &rule])
+}
+
+pub fn apply_reconnect_rule(
+    rounding: u64,
+    border_size: u64,
+    position: Option<[i64; 2]>,
+) -> std::io::Result<()> {
+    let placement = position.map_or_else(
+        || "center = true".to_string(),
+        |[x, y]| format!("move = {{ {x}, {y} }}"),
+    );
+    let rule = format!(
+        "o.window({{ title = \"^({RECONNECT_TITLE})$\" }}, \
+         {{ name = \"omavcam-reconnecting\", float = true, pin = true, no_dim = true, \
+         no_focus = true, no_initial_focus = true, keep_aspect_ratio = true, \
+         {placement}, rounding = {rounding}, border_size = {border_size}, \
          opacity = \"1 1\", tag = \"-default-opacity\" }})"
     );
     hyprctl(&["eval", &rule])
@@ -236,20 +270,79 @@ pub fn preview_position() -> std::io::Result<[i64; 2]> {
 }
 
 pub fn move_preview(at: [i64; 2]) -> std::io::Result<()> {
+    move_window(PREVIEW_SELECTOR, at)
+}
+
+fn move_window(selector: &str, at: [i64; 2]) -> std::io::Result<()> {
     hyprctl(&[
         "dispatch",
         &format!(
-            "hl.dsp.window.move({{ window = \"{PREVIEW_SELECTOR}\", x = {}, y = {} }})",
+            "hl.dsp.window.move({{ window = \"{selector}\", x = {}, y = {} }})",
             at[0], at[1]
         ),
     ])
 }
 
 pub fn center_preview() -> std::io::Result<()> {
+    center_window(PREVIEW_SELECTOR)
+}
+
+fn center_window(selector: &str) -> std::io::Result<()> {
     hyprctl(&[
         "dispatch",
-        &format!("hl.dsp.window.center({{ window = \"{PREVIEW_SELECTOR}\" }})"),
+        &format!("hl.dsp.window.center({{ window = \"{selector}\" }})"),
     ])
+}
+
+pub fn initial_hidden_position() -> std::io::Result<[i64; 2]> {
+    hidden_position(i64::from(PREVIEW_WIDTH))
+}
+
+pub fn hide_reconnect_preview(at: [i64; 2]) -> std::io::Result<()> {
+    move_window(RECONNECT_SELECTOR, at)
+}
+
+pub fn show_reconnect_preview(position: Option<[i64; 2]>) -> std::io::Result<()> {
+    match position {
+        Some(position) => move_window(RECONNECT_SELECTOR, position),
+        None => center_window(RECONNECT_SELECTOR),
+    }
+}
+
+/// Move the preview wholly left of every monitor. A fixed negative coordinate
+/// can be visible on a monitor arranged to the left of the primary one.
+pub fn hide_preview() -> std::io::Result<()> {
+    let preview = preview_client()?;
+    let width = preview["size"]
+        .as_array()
+        .and_then(|size| size.first())
+        .and_then(Value::as_i64)
+        .ok_or_else(|| std::io::Error::other("Hyprland reported no preview width"))?;
+    move_preview(hidden_position(width)?)
+}
+
+fn hidden_position(width: i64) -> std::io::Result<[i64; 2]> {
+    let mut process = Command::new("hyprctl");
+    process.args(["monitors", "-j"]);
+    let output = command::output(process)?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "hyprctl monitors failed ({})",
+            output.status
+        )));
+    }
+    let monitors: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let left = monitors
+        .as_array()
+        .and_then(|monitors| {
+            monitors
+                .iter()
+                .filter_map(|monitor| monitor["x"].as_i64())
+                .min()
+        })
+        .ok_or_else(|| std::io::Error::other("Hyprland reported no monitors"))?;
+    Ok([left.saturating_sub(width).saturating_sub(1), 0])
 }
 
 fn wait_for_preview() -> std::io::Result<()> {
@@ -315,25 +408,84 @@ fn hyprctl(args: &[&str]) -> std::io::Result<()> {
 pub fn has_consumer(node: &str, writer_pid: u32) -> std::io::Result<bool> {
     // ponytail: a /proc scan on the rare size-changing Apply; track fd events
     // only if machines with thousands of processes make this measurable.
-    let proc = std::env::var("OMAVCAM_PROC_DIR").unwrap_or_else(|_| "/proc".into());
-    Ok(fs::read_dir(proc)?.filter_map(Result::ok).any(|process| {
-        process
-            .file_name()
-            .to_string_lossy()
-            .parse::<u32>()
-            .ok()
-            .is_some_and(|pid| {
-                pid != writer_pid
-                    && fs::read_dir(process.path().join("fd"))
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Result::ok)
-                        .any(|fd| {
-                            fs::read_link(fd.path())
-                                .is_ok_and(|target| target == std::path::Path::new(node))
-                        })
-            })
-    }))
+    let proc = PathBuf::from(std::env::var("OMAVCAM_PROC_DIR").unwrap_or_else(|_| "/proc".into()));
+    let mut uncertain = false;
+    for process in fs::read_dir(proc)? {
+        let process = match process {
+            Ok(process) => process,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                uncertain = true;
+                continue;
+            }
+        };
+        let Ok(pid) = process.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if pid == writer_pid {
+            continue;
+        }
+        // The packaged node is root:video, so consumers under another uid are
+        // credible too. Scan every readable fd table and probe the device when
+        // any table is opaque.
+        let fds = match fs::read_dir(process.path().join("fd")) {
+            Ok(fds) => fds,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                uncertain = true;
+                continue;
+            }
+        };
+        for fd in fds {
+            let fd = match fd {
+                Ok(fd) => fd,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    uncertain = true;
+                    continue;
+                }
+            };
+            match fs::read_link(fd.path()) {
+                Ok(target) if target == std::path::Path::new(node) => return Ok(true),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => uncertain = true,
+            }
+        }
+    }
+    if !uncertain {
+        return Ok(false);
+    }
+
+    // Some same-user sandbox processes deliberately hide their fd tables.
+    // Ask the device whether a second reader can stream so unrelated opaque
+    // processes do not block Apply. The shared command deadline kills a
+    // stalled probe; anything inconclusive remains an error, never "free".
+    let mut process = Command::new("v4l2-ctl");
+    process.args([
+        "-d",
+        node,
+        "--stream-mmap",
+        "--stream-count=1",
+        "--stream-poll",
+    ]);
+    let output = command::output(process)?;
+    if output.status.success() {
+        return Ok(false);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("Device or resource busy") {
+        return Ok(true);
+    }
+    Err(std::io::Error::other(format!(
+        "could not inspect {node}'s consumers: v4l2-ctl stream probe failed ({}){}",
+        output.status,
+        if stderr.trim().is_empty() {
+            String::new()
+        } else {
+            format!(": {}", stderr.trim())
+        }
+    )))
 }
 
 fn node_is_capture(node: &str) -> std::io::Result<bool> {

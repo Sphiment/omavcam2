@@ -116,4 +116,26 @@ fn the_panel_toggles_the_preview_with_the_omarchy_theme_tokens() {
         panel.contains("send(\"preview\""),
         "the panel never asks the daemon"
     );
+    assert!(
+        panel.contains("daemonState.preview_style"),
+        "the panel does not compare its theme with the applied whole state"
+    );
+    assert!(
+        panel.contains("if (message.ok) syncPreviewStyle()"),
+        "a refused preview style would be retried forever"
+    );
+    assert!(
+        panel.contains("known.transport === \"wireless\""),
+        "the picker offers unplugged wired registry entries"
+    );
+    assert!(
+        panel.contains("FloatingWindow")
+            && panel.contains("title: \"omavcam reconnecting\"")
+            && panel.contains("visible: root.reconnecting && root.previewing"),
+        "the floating preview does not show reconnecting"
+    );
+    assert!(
+        panel.contains("activeColor: root.reconnecting ? root.urgent"),
+        "the reconnect warning uses the ordinary capture color"
+    );
 }

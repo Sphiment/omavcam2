@@ -3,19 +3,19 @@
 //! Two message types travel from the daemon to a client:
 //!
 //! ```text
-//! {"type":"state","v":3,"rev":4,"state":{...}}
-//! {"type":"response","v":3,"id":"7","rev":4,"ok":true}
-//! {"type":"response","v":3,"id":"7","rev":4,"ok":false,"error":{"code":"...","message":"..."}}
+//! {"type":"state","v":4,"rev":4,"state":{...}}
+//! {"type":"response","v":4,"id":"7","rev":4,"ok":true}
+//! {"type":"response","v":4,"id":"7","rev":4,"ok":false,"error":{"code":"...","message":"..."}}
 //! ```
 //!
 //! and one from a client to the daemon:
 //!
 //! ```text
-//! {"v":3,"id":"7","kind":"status"}
-//! {"v":3,"id":"8","kind":"select","serial":"39281FDJH0031T"}
-//! {"v":3,"id":"9","kind":"start"}
-//! {"v":3,"id":"10","kind":"set","setting":"zoom","value":2}
-//! {"v":3,"id":"11","kind":"apply"}
+//! {"v":4,"id":"7","kind":"status"}
+//! {"v":4,"id":"8","kind":"select","serial":"39281FDJH0031T"}
+//! {"v":4,"id":"9","kind":"start"}
+//! {"v":4,"id":"10","kind":"set","setting":"zoom","value":2}
+//! {"v":4,"id":"11","kind":"apply"}
 //! ```
 //!
 //! The daemon pushes the *whole* state, unprompted, to every connected client
@@ -30,7 +30,7 @@ use crate::settings::SettingsState;
 
 /// Bumped whenever the shape below changes incompatibly. A client sending
 /// anything else is rejected with an error rather than misparsed.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// Longest accepted request line, newline included. A client cannot make the
 /// daemon allocate past this.
@@ -43,8 +43,8 @@ pub struct State {
     /// Whether the latest adb server probe or device scan succeeded.
     pub adb_ok: bool,
     pub connection: Connection,
-    /// The running capture, or nothing. There is no third state: a capture
-    /// that has stopped, however it stopped, is a capture that is not there.
+    /// The requested capture, retained while its writer reconnects. The
+    /// connection phase says whether it is currently feeding frames.
     pub capture: Option<Capture>,
     /// Every phone adb can see, whatever phase the connection is in. A fact
     /// about the world rather than a property of one connection state, which
@@ -59,6 +59,25 @@ pub struct State {
     /// Every phone remembered in the one wired/wireless registry.
     #[serde(default)]
     pub known: Vec<KnownPhone>,
+    /// The compositor values actually applied to the preview. Clients compare
+    /// their live theme with these rather than assuming a one-shot sync held.
+    #[serde(default)]
+    pub preview_style: PreviewStyle,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreviewStyle {
+    pub rounding: u64,
+    pub border_size: u64,
+}
+
+impl Default for PreviewStyle {
+    fn default() -> Self {
+        Self {
+            rounding: 0,
+            border_size: 1,
+        }
+    }
 }
 
 /// One phone adb reports, and whether adb will talk to it.
@@ -71,7 +90,7 @@ pub struct Attached {
     pub authorised: bool,
 }
 
-/// One running stream from a phone into the virtual camera. Everything about
+/// One requested stream from a phone into the virtual camera. Everything about
 /// it is fixed at launch — changing any of it means replacing the capture.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Capture {
@@ -108,8 +127,9 @@ pub enum Transport {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KnownPhone {
-    /// Durable identity for per-phone settings. Unlike a wireless adb serial,
-    /// this does not change when Android chooses a new connect port.
+    /// Durable identity for per-phone settings. A provisional wireless entry
+    /// starts with its endpoint here; learning the device ID replaces that
+    /// value while migrating settings, after which port changes leave it alone.
     #[serde(default)]
     pub id: String,
     pub phone: Phone,
@@ -153,6 +173,11 @@ pub enum Connection {
         phone: Phone,
     },
     Connected {
+        phone: Phone,
+    },
+    /// A logical capture still owns the virtual camera while its selected
+    /// phone or writer is being recovered.
+    Reconnecting {
         phone: Phone,
     },
     NeedsPairing,

@@ -248,10 +248,9 @@ fn parse(text: &str) -> Result<Vec<Lens>, String> {
             high_speed = true;
         } else if !high_speed {
             if let Some(size) = line.strip_prefix("- ") {
-                if parse_size(size).is_some() {
-                    if let Some(lens) = &mut current {
-                        lens.resolutions.push(size.to_string());
-                    }
+                parse_size(size).ok_or_else(|| format!("invalid camera resolution {size:?}"))?;
+                if let Some(lens) = &mut current {
+                    lens.resolutions.push(size.to_string());
                 }
             }
         }
@@ -277,6 +276,9 @@ fn parse_lens(rest: &str) -> Result<Lens, String> {
         .ok_or_else(|| format!("could not parse camera characteristics from {rest:?}"))?;
     let mut fields = details.split(',').map(str::trim);
     let facing = fields.next().unwrap_or_default().to_string();
+    if facing.is_empty() {
+        return Err(format!("missing camera facing in {rest:?}"));
+    }
     let sensor_size = fields.next().unwrap_or_default().to_string();
     parse_size(&sensor_size).ok_or_else(|| format!("invalid sensor size {sensor_size:?}"))?;
     let frame_rates = between(details, "fps={", "}")?
@@ -289,7 +291,12 @@ fn parse_lens(rest: &str) -> Result<Lens, String> {
         .map(|value| value.trim().parse::<f64>())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| format!("invalid zoom range in {rest:?}"))?;
-    if zoom.len() != 2 || frame_rates.is_empty() {
+    if zoom.len() != 2
+        || frame_rates.is_empty()
+        || frame_rates.contains(&0)
+        || !zoom.iter().all(|value| value.is_finite() && *value >= 0.0)
+        || zoom[0] > zoom[1]
+    {
         return Err(format!("incomplete camera characteristics in {rest:?}"));
     }
     Ok(Lens {
@@ -360,7 +367,7 @@ fn string(value: &Value) -> Result<&str, String> {
 fn parse_size(size: &str) -> Option<(u32, u32)> {
     let (width, height) = size.split_once('x')?;
     let size = (width.parse().ok()?, height.parse().ok()?);
-    (size.0 > 0 && size.1 > 0).then_some(size)
+    (size.0 >= 2 && size.1 >= 2).then_some(size)
 }
 
 fn aspect_ratio(size: &str) -> Result<String, String> {

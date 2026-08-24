@@ -23,7 +23,7 @@ Panel {
 
   // The protocol the daemon speaks, from src/protocol.rs. A mismatch is
   // reported rather than misparsed.
-  readonly property int protocol: 3
+  readonly property int protocol: 4
 
   // The whole state, exactly as pushed, or null while we have not been told.
   // Not `state`: every QML Item already has one of those.
@@ -42,12 +42,20 @@ Panel {
   // What the daemon last refused, in its own words. The panel shows it; the
   // bar does not, because a refused request is not a broken setup.
   property string refusal: ""
-  property bool previewStyleSynced: false
+  readonly property int previewRounding: Style.cornerRadius
+  readonly property int previewBorderSize: Style.normalBorderWidth
 
   readonly property bool linked: daemonSocket.connected && daemonState !== null
   readonly property bool capturing: !!(daemonState && daemonState.capture)
   readonly property bool previewing: !!(capturing && daemonState.capture.preview)
   readonly property string connectionState: daemonState ? daemonState.connection.state : ""
+  readonly property bool reconnecting: connectionState === "reconnecting"
+  readonly property int reconnectPreviewHeight: {
+    var size = capturing ? String(daemonState.capture.size).split("x") : []
+    var width = size.length === 2 ? Number(size[0]) : 0
+    var height = size.length === 2 ? Number(size[1]) : 0
+    return width > 0 && height > 0 ? Math.max(1, Math.round(640 * height / width)) : 360
+  }
 
   // What the bar has to warn about: something is wrong and only the person at
   // the desk can fix it. No phone attached is not trouble, it is Tuesday.
@@ -55,7 +63,8 @@ Panel {
     ? (!daemonState.adb_ok
       || connectionState === "unauthorised"
       || connectionState === "pairing_failed"
-      || connectionState === "unreachable")
+      || connectionState === "unreachable"
+      || reconnecting)
     : unreachable
 
   // The phone the connection names, in whatever phase it is in.
@@ -76,7 +85,8 @@ Panel {
     var choices = (daemonState.attached || []).slice()
     var knownPhones = daemonState.known || []
     knownPhones.forEach(function (known) {
-      if (!choices.some(function (item) { return item.phone.serial === known.phone.serial })) {
+      if (known.transport === "wireless"
+          && !choices.some(function (item) { return item.phone.serial === known.phone.serial })) {
         choices.push({"phone": known.phone, "authorised": true})
       }
     })
@@ -124,12 +134,11 @@ Panel {
     }
     if (message.type === "state") {
       daemonState = message.state
-      if (!capturing) previewStyleSynced = false
       syncPreviewStyle()
     } else if (message.type === "response" && message.id === pending) {
       pending = ""
       refusal = message.ok ? "" : message.error.message
-      syncPreviewStyle()
+      if (message.ok) syncPreviewStyle()
     }
   }
 
@@ -152,10 +161,14 @@ Panel {
   // A shell restart reconnects to the same daemon and the same scrcpy window.
   // Reapply the live tokens without owning any geometry or capture state here.
   function syncPreviewStyle() {
-    if (!capturing || pending !== "" || previewStyleSynced) return
-    previewStyleSynced = true
+    if (!capturing || reconnecting || pending !== "") return
+    var applied = daemonState.preview_style || {"rounding": 0, "border_size": 1}
+    if (applied.rounding === previewRounding && applied.border_size === previewBorderSize) return
     send("preview", previewArgs(previewing))
   }
+
+  onPreviewRoundingChanged: syncPreviewStyle()
+  onPreviewBorderSizeChanged: syncPreviewStyle()
 
   // ---- what all that says ------------------------------------------------
 
@@ -169,6 +182,7 @@ Panel {
     if (connection.state === "unauthorised") return connection.phone.name + " has not accepted the debugging prompt"
     if (connection.state === "connecting") return "Connecting to " + connection.phone.name
     if (connection.state === "connected") return connection.phone.name + " connected"
+    if (connection.state === "reconnecting") return "Reconnecting to " + connection.phone.name + " — last frame held"
     if (connection.state === "needs_pairing") return "Wireless pairing needed — run omavcam pair"
     if (connection.state === "pairing_failed") {
       if (connection.reason === "wrong_code") return "Wireless pairing failed — wrong code"
@@ -181,19 +195,21 @@ Panel {
   }
 
   function captureWords() {
+    if (reconnecting && capturing) return "Reconnecting to " + daemonState.capture.phone.name + " — last frame held"
     if (capturing) return daemonState.capture.size + " from " + daemonState.capture.phone.name
     return "Off — omavcam is in no camera list"
   }
 
   function tooltipWords() {
+    if (reconnecting && capturing) return "omavcam — reconnecting to " + daemonState.capture.phone.name
     if (capturing) return "omavcam — capturing from " + daemonState.capture.phone.name
     return "omavcam — " + connectionWords()
   }
 
   // nf-md-video (U+F03D), nf-fa-warning (U+F071), nf-md-video_off (U+F0568):
   // a running capture, something only the person at the desk can fix, and off.
-  readonly property string icon: capturing ? "" : (troubled ? "" : "󰕨")
-  readonly property color light: capturing ? Color.accent : (troubled ? urgent : Qt.darker(foreground, 1.8))
+  readonly property string icon: reconnecting ? "" : (capturing ? "" : (troubled ? "" : "󰕨"))
+  readonly property color light: reconnecting ? urgent : (capturing ? Color.accent : (troubled ? urgent : Qt.darker(foreground, 1.8)))
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -223,7 +239,6 @@ Panel {
       } else {
         root.daemonState = null
         root.pending = ""
-        root.previewStyleSynced = false
       }
     }
   }
@@ -255,13 +270,59 @@ Panel {
     }
   }
 
+  // scrcpy owns the video window and necessarily exits with the phone. Keep
+  // that same preview place honest while its requested visibility is on: this
+  // status-only window decodes nothing and never reads the virtual camera.
+  FloatingWindow {
+    id: reconnectPreview
+    visible: root.reconnecting && root.previewing
+    title: "omavcam reconnecting"
+    implicitWidth: 640
+    implicitHeight: root.reconnectPreviewHeight
+    color: Color.background
+
+    Rectangle {
+      anchors.fill: parent
+      color: Color.background
+      radius: root.previewRounding
+      border.width: Math.max(1, root.previewBorderSize)
+      border.color: root.urgent
+
+      Column {
+        anchors.centerIn: parent
+        width: Math.max(1, parent.width - Style.space(48))
+        spacing: Style.space(8)
+
+        Text {
+          width: parent.width
+          text: "Reconnecting…"
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.title
+          font.weight: Font.DemiBold
+          horizontalAlignment: Text.AlignHCenter
+        }
+
+        Text {
+          width: parent.width
+          text: root.capturing ? root.daemonState.capture.phone.name + " · camera stays selected" : ""
+          color: Color.muted
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          horizontalAlignment: Text.AlignHCenter
+          wrapMode: Text.WordWrap
+        }
+      }
+    }
+  }
+
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
     text: root.icon
     active: root.capturing || root.troubled
-    activeColor: root.capturing ? Color.accent : root.urgent
+    activeColor: root.reconnecting ? root.urgent : (root.capturing ? Color.accent : root.urgent)
     tooltipText: root.tooltipWords()
     onPressed: function(b) { root.toggle() }
   }
@@ -323,11 +384,11 @@ Panel {
         Toggle {
           width: parent.width
           label: "Preview"
-          description: root.capturing ? (root.previewing ? "Visible" : "Hidden") : "Start a capture first"
+          description: root.reconnecting ? "Unavailable while reconnecting" : (root.capturing ? (root.previewing ? "Visible" : "Hidden") : "Start a capture first")
           checked: root.previewing
           foreground: root.foreground
           fontFamily: root.fontFamily
-          enabled: root.linked && root.capturing
+          enabled: root.linked && root.capturing && !root.reconnecting
           opacity: enabled ? 1 : 0.5
           onClicked: root.togglePreview()
         }

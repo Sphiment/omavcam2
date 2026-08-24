@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::phones::{self, Registry};
 use crate::protocol::{
     error_message, ok_message, socket_path, state_message, Capture, Connection, KnownPhone,
-    PairingFailure, Phone, State, Transport, MAX_MESSAGE, VERSION,
+    PairingFailure, Phone, PreviewStyle, State, Transport, MAX_MESSAGE, VERSION,
 };
 use crate::settings::{self, CameraSettings, SettingsState};
 use crate::{capture, command, protocol};
@@ -46,13 +46,12 @@ struct Daemon {
     next_client: u64,
     state_dir: PathBuf,
     registry: Registry,
-    /// The running scrcpy, if there is one. The state's `capture` is what this
-    /// looks like to a client; the two are set together.
+    /// The running scrcpy, if there is one. The state's logical capture stays
+    /// present while this is absent during reconnection.
     capture: Option<Child>,
     /// Where the preview was before it was hidden. Size stays on the same
     /// scrcpy window, so only its position needs restoring.
     preview_position: Option<[i64; 2]>,
-    preview_style: (u64, u64),
 }
 
 type Shared = Arc<Mutex<Daemon>>;
@@ -122,13 +121,7 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
             // adb cannot see anything, so neither can we. Leaving the last
             // list standing would offer a picker full of phones nothing has
             // confirmed are still there.
-            let state = State {
-                adb_ok: false,
-                connection: Connection::NoPhone,
-                attached: Vec::new(),
-                ..shared.lock().unwrap().state.clone()
-            };
-            publish(shared, state);
+            publish_adb_failure(shared);
             return false;
         }
     };
@@ -148,14 +141,16 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
     let reconnect = {
         let inner = shared.lock().unwrap();
         inner.registry.selected.as_deref().and_then(|selected| {
-            (!attached.iter().any(|phone| phone.serial == selected))
-                .then(|| {
-                    inner.registry.phones.iter().find(|known| {
-                        known.phone.serial == selected && known.transport == Transport::Wireless
-                    })
+            (!attached
+                .iter()
+                .any(|phone| phone.serial == selected && phone.adb_state == "device"))
+            .then(|| {
+                inner.registry.phones.iter().find(|known| {
+                    known.phone.serial == selected && known.transport == Transport::Wireless
                 })
-                .flatten()
-                .cloned()
+            })
+            .flatten()
+            .cloned()
         })
     };
     if let Some(known) = reconnect {
@@ -167,10 +162,13 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
             let listed = attached.iter().map(Into::into).collect();
             publish_connection(
                 shared,
-                Connection::Unreachable {
-                    phone: known.phone,
-                    connect_address: address,
-                },
+                reconnecting_or(
+                    shared,
+                    Connection::Unreachable {
+                        phone: known.phone,
+                        connect_address: address,
+                    },
+                ),
                 listed,
             );
             return true;
@@ -179,21 +177,25 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
             Ok(attached) => attached,
             Err(e) => {
                 eprintln!("omavcam: could not scan phones after connecting: {e}");
+                publish_adb_failure(shared);
                 return false;
             }
         };
         let found = attached
             .iter()
-            .find(|phone| phone.serial == address)
+            .find(|phone| phone.serial == address && phone.adb_state == "device")
             .cloned();
         let Some(found) = found else {
             let listed = attached.iter().map(Into::into).collect();
             publish_connection(
                 shared,
-                Connection::Unreachable {
-                    phone: known.phone,
-                    connect_address: address,
-                },
+                reconnecting_or(
+                    shared,
+                    Connection::Unreachable {
+                        phone: known.phone,
+                        connect_address: address,
+                    },
+                ),
                 listed,
             );
             return true;
@@ -228,22 +230,54 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
         _ => connection,
     };
     let listed: Vec<protocol::Attached> = attached.iter().map(Into::into).collect();
-    publish_connection(shared, connection.clone(), listed.clone());
+    publish_connection(
+        shared,
+        reconnecting_or(shared, connection.clone()),
+        listed.clone(),
+    );
 
-    if let Connection::Connecting { phone } = connection {
-        if phones::connect(&phone.serial) {
-            publish_connection(shared, Connection::Connected { phone }, listed);
+    let confirmed = match connection {
+        Connection::Connected { phone } => Some(phone),
+        Connection::Connecting { phone } if phones::connect(&phone.serial) => {
+            let needs_writer = {
+                let inner = shared.lock().unwrap();
+                inner.state.capture.is_some() && inner.capture.is_none()
+            };
+            publish_connection(
+                shared,
+                if needs_writer {
+                    Connection::Reconnecting {
+                        phone: phone.clone(),
+                    }
+                } else {
+                    Connection::Connected {
+                        phone: phone.clone(),
+                    }
+                },
+                listed.clone(),
+            );
+            Some(phone)
         }
-        // If it did not answer we stay in Connecting and the next pass tries
-        // again — a phone that is booting or half-asleep needs no error.
-    }
-    let connected = shared.lock().unwrap().state.connection.clone();
-    if let Connection::Connected { phone } = connected {
+        // If it did not answer we stay in Connecting (or Reconnecting for a
+        // logical capture) and the next pass tries again.
+        _ => None,
+    };
+    if let Some(phone) = confirmed {
         if let Err(error) = ensure_settings_locked(shared, &phone.serial) {
             eprintln!(
                 "omavcam: could not inspect {}'s cameras: {error}",
                 phone.name
             );
+        }
+        let needs_writer = {
+            let inner = shared.lock().unwrap();
+            inner.state.capture.is_some() && inner.capture.is_none()
+        };
+        if needs_writer {
+            resume_capture_locked(shared, &phone);
+            if shared.lock().unwrap().capture.is_some() {
+                publish_connection(shared, Connection::Connected { phone }, listed);
+            }
         }
     }
     true
@@ -294,14 +328,206 @@ fn remember_attached(shared: &Shared, attached: &[phones::Attached]) {
 
 fn publish_connection(shared: &Shared, connection: Connection, attached: Vec<protocol::Attached>) {
     let known = shared.lock().unwrap().registry.phones.clone();
+    let settings = match &connection {
+        Connection::Connected { phone } | Connection::Reconnecting { phone } => shared
+            .lock()
+            .unwrap()
+            .state
+            .settings
+            .clone()
+            .filter(|settings| settings.phone == phone.serial),
+        _ => None,
+    };
     let state = State {
         adb_ok: true,
         connection,
         attached,
         known,
+        settings,
         ..shared.lock().unwrap().state.clone()
     };
     publish(shared, state);
+}
+
+/// adb could not describe the desk. A logical capture is the one exception to
+/// NoPhone: retain that phone's applied state while its writer reconnects.
+fn publish_adb_failure(shared: &Shared) {
+    let connection = reconnecting_or(shared, Connection::NoPhone);
+    let previous = shared.lock().unwrap().state.clone();
+    let settings = match &connection {
+        Connection::Reconnecting { phone } => previous
+            .settings
+            .filter(|settings| settings.phone == phone.serial),
+        _ => None,
+    };
+    publish(
+        shared,
+        State {
+            adb_ok: false,
+            connection,
+            attached: Vec::new(),
+            settings,
+            ..previous
+        },
+    );
+}
+
+fn reconnecting_or(shared: &Shared, connection: Connection) -> Connection {
+    match connection {
+        Connection::Connected { .. } => connection,
+        _ => {
+            let has_visible_writer = {
+                let inner = shared.lock().unwrap();
+                inner.capture.is_some()
+                    && inner
+                        .state
+                        .capture
+                        .as_ref()
+                        .is_some_and(|capture| capture.preview)
+            };
+            if has_visible_writer {
+                prepare_reconnect_preview(shared);
+            }
+            let (phone, child) = {
+                let mut inner = shared.lock().unwrap();
+                (
+                    inner
+                        .state
+                        .capture
+                        .as_ref()
+                        .map(|capture| capture.phone.clone()),
+                    inner.capture.take(),
+                )
+            };
+            if let Some(mut child) = child {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            phone
+                .map(|phone| Connection::Reconnecting { phone })
+                .unwrap_or(connection)
+        }
+    }
+}
+
+fn prepare_reconnect_preview(shared: &Shared) {
+    let (visible, style, saved) = {
+        let inner = shared.lock().unwrap();
+        (
+            inner
+                .state
+                .capture
+                .as_ref()
+                .is_some_and(|capture| capture.preview),
+            inner.state.preview_style.clone(),
+            inner.preview_position,
+        )
+    };
+    if !visible {
+        return;
+    }
+    let position = capture::preview_position().ok().or(saved);
+    if let Some(position) = position {
+        shared.lock().unwrap().preview_position = Some(position);
+    }
+    if let Err(error) = capture::apply_reconnect_rule(style.rounding, style.border_size, position) {
+        eprintln!("omavcam: could not place the reconnect preview: {error}");
+    }
+}
+
+fn resume_capture_locked(shared: &Shared, phone: &Phone) {
+    let (public, settings, style, position) = {
+        let inner = shared.lock().unwrap();
+        if inner.capture.is_some() {
+            return;
+        }
+        let Some(public) = inner
+            .state
+            .capture
+            .clone()
+            .filter(|capture| capture.phone.serial == phone.serial)
+        else {
+            return;
+        };
+        let Some(settings) = inner
+            .state
+            .settings
+            .as_ref()
+            .filter(|settings| settings.phone == phone.serial)
+            .map(|settings| settings.applied.clone())
+        else {
+            return;
+        };
+        (
+            public,
+            settings,
+            inner.state.preview_style.clone(),
+            inner.preview_position,
+        )
+    };
+    if settings::output_size(&settings) != public.size {
+        eprintln!(
+            "omavcam: refusing to reconnect {} at a different frame size",
+            phone.name
+        );
+        return;
+    }
+    if public.preview {
+        let hidden = match capture::initial_hidden_position() {
+            Ok(hidden) => hidden,
+            Err(error) => {
+                eprintln!("omavcam: could not place the reconnect preview offscreen: {error}");
+                return;
+            }
+        };
+        if let Err(error) =
+            capture::apply_reconnect_rule(style.rounding, style.border_size, Some(hidden))
+                .and_then(|()| capture::hide_reconnect_preview(hidden))
+        {
+            eprintln!("omavcam: could not hide the reconnect preview: {error}");
+            let _ = capture::apply_reconnect_rule(style.rounding, style.border_size, position);
+            return;
+        }
+    }
+    let started = spawn_replacement(&phone.serial, &public, &settings, &style, position);
+    match started {
+        Ok(child) => shared.lock().unwrap().capture = Some(child),
+        Err(error) => {
+            if public.preview {
+                if let Err(restore_error) =
+                    capture::apply_reconnect_rule(style.rounding, style.border_size, position)
+                        .and_then(|()| capture::show_reconnect_preview(position))
+                {
+                    eprintln!("omavcam: could not restore the reconnect preview: {restore_error}");
+                }
+            }
+            eprintln!("omavcam: could not reconnect {}: {error}", phone.name);
+            let attached = shared.lock().unwrap().state.attached.clone();
+            publish_connection(
+                shared,
+                Connection::Reconnecting {
+                    phone: phone.clone(),
+                },
+                attached,
+            );
+        }
+    }
+}
+
+fn spawn_replacement(
+    serial: &str,
+    public: &Capture,
+    settings: &CameraSettings,
+    style: &PreviewStyle,
+    position: Option<[i64; 2]>,
+) -> std::io::Result<Child> {
+    let position = if public.preview {
+        position
+    } else {
+        Some(capture::initial_hidden_position()?)
+    };
+    capture::apply_preview_rule(style.rounding, style.border_size, position)?;
+    capture::spawn(serial, &public.node, settings)
 }
 
 fn publish_capture(shared: &Shared, capture: Option<Capture>) {
@@ -334,13 +560,14 @@ fn ensure_settings_locked(shared: &Shared, serial: &str) -> Result<(), String> {
     {
         return Ok(());
     }
-    let saved = shared
-        .lock()
-        .unwrap()
-        .registry
-        .settings
-        .get(serial)
-        .cloned();
+    let saved = {
+        let inner = shared.lock().unwrap();
+        inner
+            .registry
+            .settings
+            .get(&settings_key(&inner.registry, serial))
+            .cloned()
+    };
     let lenses = settings::inspect(serial)?;
     publish_settings(
         shared,
@@ -356,22 +583,36 @@ fn persist_settings(
 ) -> std::io::Result<()> {
     let (state_dir, registry, previous) = {
         let mut inner = shared.lock().unwrap();
-        let previous = inner.registry.settings.insert(serial.to_string(), settings);
-        (inner.state_dir.clone(), inner.registry.clone(), previous)
+        let key = settings_key(&inner.registry, serial);
+        let previous = inner.registry.settings.insert(key.clone(), settings);
+        (
+            inner.state_dir.clone(),
+            inner.registry.clone(),
+            (key, previous),
+        )
     };
     if let Err(error) = phones::save(&state_dir, &registry) {
         let mut inner = shared.lock().unwrap();
-        match previous {
+        match previous.1 {
             Some(settings) => {
-                inner.registry.settings.insert(serial.to_string(), settings);
+                inner.registry.settings.insert(previous.0, settings);
             }
             None => {
-                inner.registry.settings.remove(serial);
+                inner.registry.settings.remove(&previous.0);
             }
         }
         return Err(error);
     }
     Ok(())
+}
+
+fn settings_key(registry: &Registry, serial: &str) -> String {
+    registry
+        .phones
+        .iter()
+        .find(|known| known.phone.serial == serial)
+        .map(|known| known.id.clone())
+        .unwrap_or_else(|| serial.to_string())
 }
 
 /// Launch a capture against the connected phone. Returns the error code and
@@ -393,14 +634,15 @@ fn start_capture(
                 .to_string(),
         ));
     }
-    // Answer from what is true now, not from whatever the last poll saw: the
-    // phone may have gone, and the capture may already have died with it.
-    if !refresh_connection_locked(shared) {
-        return Err(("adb_unavailable", "adb devices failed".to_string()));
-    }
+    // Answer from what is true now, not from whatever the last poll saw. Reap
+    // first so this refresh can immediately resume a writer that just died.
     reap_capture_locked(shared);
-    if shared.lock().unwrap().capture.is_some() {
+    let adb_ok = refresh_connection_locked(shared);
+    if shared.lock().unwrap().state.capture.is_some() {
         return Ok(());
+    }
+    if !adb_ok {
+        return Err(("adb_unavailable", "adb devices failed".to_string()));
     }
 
     let phone = match shared.lock().unwrap().state.connection.clone() {
@@ -422,24 +664,41 @@ fn start_capture(
     // no capabilities to load a module with (ADR-0008).
     let node = capture::find_node().map_err(|e| ("no_virtual_camera", e))?;
     capture::set_controls(&node);
+    capture::apply_preview_rule(rounding, border_size, None).map_err(|e| {
+        (
+            "capture_failed",
+            format!("could not prepare the preview: {e}"),
+        )
+    })?;
+    capture::apply_reconnect_rule(rounding, border_size, None).map_err(|e| {
+        (
+            "capture_failed",
+            format!("could not prepare the reconnect preview: {e}"),
+        )
+    })?;
 
-    match capture::spawn(&phone.serial, &node, &settings, rounding, border_size) {
+    match capture::spawn(&phone.serial, &node, &settings) {
         Ok(child) => {
+            let position = capture::preview_position().ok();
             let mut inner = shared.lock().unwrap();
             inner.capture = Some(child);
-            inner.preview_position = None;
-            inner.preview_style = (rounding, border_size);
+            inner.preview_position = position;
             drop(inner);
-            publish_capture(
-                shared,
-                Some(Capture {
+            let state = State {
+                capture: Some(Capture {
                     phone,
                     node,
                     size: settings::output_size(&settings),
                     stay_awake: false,
                     preview: true,
                 }),
-            );
+                preview_style: PreviewStyle {
+                    rounding,
+                    border_size,
+                },
+                ..shared.lock().unwrap().state.clone()
+            };
+            publish(shared, state);
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err((
@@ -462,6 +721,7 @@ fn refusal_reason(connection: &Connection) -> String {
             phone.name
         ),
         Connection::Connecting { phone } => format!("still connecting to {}", phone.name),
+        Connection::Reconnecting { phone } => format!("reconnecting to {}", phone.name),
         Connection::NeedsPairing => {
             "wireless pairing is needed; run: omavcam pair".to_string()
         }
@@ -484,6 +744,7 @@ fn refusal_reason(connection: &Connection) -> String {
 fn stop_capture(shared: &Shared) {
     let _turn = transition();
     stop_capture_locked(shared);
+    refresh_connection_locked(shared);
 }
 
 fn stop_capture_locked(shared: &Shared) {
@@ -496,11 +757,24 @@ fn stop_capture_locked(shared: &Shared) {
         let _ = child.kill();
         let _ = child.wait();
     }
-    publish_capture(shared, None);
+    let previous = shared.lock().unwrap().state.clone();
+    let connection = if matches!(previous.connection, Connection::Reconnecting { .. }) {
+        Connection::NoPhone
+    } else {
+        previous.connection.clone()
+    };
+    publish(
+        shared,
+        State {
+            connection,
+            capture: None,
+            ..previous
+        },
+    );
 }
 
-/// scrcpy dying on its own — the phone unplugged, the process killed — must
-/// leave a switch that says off rather than one that claims to be on.
+/// Losing the writer retains the logical capture: the open consumer keeps the
+/// node and format pinned while the watcher restarts this exact capture.
 fn reap_capture_locked(shared: &Shared) {
     let exited = {
         let mut inner = shared.lock().unwrap();
@@ -512,11 +786,19 @@ fn reap_capture_locked(shared: &Shared) {
         }
     };
     if exited {
+        prepare_reconnect_preview(shared);
         let mut inner = shared.lock().unwrap();
         inner.capture = None;
-        inner.preview_position = None;
+        let phone = inner
+            .state
+            .capture
+            .as_ref()
+            .map(|capture| capture.phone.clone());
         drop(inner);
-        publish_capture(shared, None);
+        if let Some(phone) = phone {
+            let attached = shared.lock().unwrap().state.attached.clone();
+            publish_connection(shared, Connection::Reconnecting { phone }, attached);
+        }
     }
 }
 
@@ -532,13 +814,32 @@ fn set_preview(
         "no_capture",
         "start a capture before opening its preview".to_string(),
     ))?;
-    capture::apply_preview_rule(rounding, border_size).map_err(|e| {
+    capture::apply_preview_style(rounding, border_size).map_err(|e| {
         (
             "preview_failed",
             format!("could not theme the preview: {e}"),
         )
     })?;
-    shared.lock().unwrap().preview_style = (rounding, border_size);
+    capture::apply_reconnect_rule(
+        rounding,
+        border_size,
+        shared.lock().unwrap().preview_position,
+    )
+    .map_err(|e| {
+        (
+            "preview_failed",
+            format!("could not theme the reconnect preview: {e}"),
+        )
+    })?;
+    let style = PreviewStyle {
+        rounding,
+        border_size,
+    };
+    let state = State {
+        preview_style: style,
+        ..shared.lock().unwrap().state.clone()
+    };
+    publish(shared, state);
     if public.preview == visible {
         return Ok(());
     }
@@ -557,7 +858,7 @@ fn set_preview(
                 format!("could not locate the preview: {e}"),
             )
         })?;
-        capture::move_preview([-2000, -2000])
+        capture::hide_preview()
             .map_err(|e| ("preview_failed", format!("could not hide the preview: {e}")))?;
         shared.lock().unwrap().preview_position = Some(position);
     }
@@ -627,6 +928,14 @@ fn remember_wireless(shared: &Shared, address: &str, name: &str, stable_id: Opti
         known.transport = Transport::Wireless;
         known.connect_address = Some(address.to_string());
         if let Some(id) = stable_id {
+            // The endpoint is the only identity available during a provisional
+            // pairing. Learning Android's device ID upgrades that key once;
+            // move its settings in the same registry transaction.
+            if id != address && !inner.registry.settings.contains_key(id) {
+                if let Some(settings) = inner.registry.settings.remove(address) {
+                    inner.registry.settings.insert(id.to_string(), settings);
+                }
+            }
             known.id = id.to_string();
         }
         inner.registry.phones.retain(|other| {
@@ -757,57 +1066,123 @@ fn update_connect_address(
                 .to_string(),
         ));
     }
-    let phone =
-        {
-            let mut inner = shared.lock().unwrap();
-            let Some(known) = inner.registry.phones.iter_mut().find(|known| {
-                known.phone.serial == serial && known.transport == Transport::Wireless
-            }) else {
-                return Err((
-                    "no_such_phone",
-                    format!("no paired phone {serial:?} is known"),
-                ));
-            };
-            known.phone.serial = connect_address.to_string();
-            known.connect_address = Some(connect_address.to_string());
-            let phone = known.phone.clone();
-            if inner.registry.selected.as_deref() == Some(serial) {
-                inner.registry.selected = Some(connect_address.to_string());
-            }
-            phone
-        };
-    save_registry(shared);
-
-    let capture_uses_old_address = shared
+    let known = shared
         .lock()
         .unwrap()
-        .state
-        .capture
-        .as_ref()
-        .is_some_and(|capture| capture.phone.serial == serial);
-    if capture_uses_old_address {
-        stop_capture_locked(shared);
-    }
+        .registry
+        .phones
+        .iter()
+        .find(|known| known.phone.serial == serial && known.transport == Transport::Wireless)
+        .cloned()
+        .ok_or_else(|| {
+            (
+                "no_such_phone",
+                format!("no paired phone {serial:?} is known"),
+            )
+        })?;
     if !phones::connect_wireless(connect_address) {
         let attached = shared.lock().unwrap().state.attached.clone();
         publish_connection(
             shared,
-            Connection::Unreachable {
-                phone,
-                connect_address: connect_address.to_string(),
-            },
+            reconnecting_or(
+                shared,
+                Connection::Unreachable {
+                    phone: known.phone,
+                    connect_address: connect_address.to_string(),
+                },
+            ),
             attached,
         );
         return Err(("unreachable", unreachable_message().to_string()));
     }
-    if let Ok(attached) = phones::scan() {
-        if let Some(found) = attached
-            .iter()
-            .find(|phone| phone.serial == connect_address)
-        {
-            let stable_id = phones::stable_id(connect_address);
-            remember_wireless(shared, connect_address, &found.name, stable_id.as_deref());
+    let attached = phones::scan().map_err(|error| {
+        eprintln!("omavcam: could not scan phones after connecting: {error}");
+        publish_adb_failure(shared);
+        ("adb_unavailable", error.to_string())
+    })?;
+    let found = attached
+        .iter()
+        .find(|phone| phone.serial == connect_address)
+        .ok_or_else(|| {
+            let listed = attached.iter().map(Into::into).collect();
+            publish_connection(
+                shared,
+                reconnecting_or(
+                    shared,
+                    Connection::Unreachable {
+                        phone: known.phone.clone(),
+                        connect_address: connect_address.to_string(),
+                    },
+                ),
+                listed,
+            );
+            ("unreachable", unreachable_message().to_string())
+        })?;
+    let stable_id = phones::stable_id(connect_address).ok_or_else(|| {
+        (
+            "phone_identity_failed",
+            "could not verify that the new connect address belongs to the paired phone".to_string(),
+        )
+    })?;
+    if stable_id != known.id {
+        return Err((
+            "wrong_phone",
+            "the new connect address belongs to a different phone; selection was not changed"
+                .to_string(),
+        ));
+    }
+
+    let phone = Phone {
+        serial: connect_address.to_string(),
+        name: found.name.clone(),
+    };
+    let capture_retargeted = {
+        let mut inner = shared.lock().unwrap();
+        let remembered = inner
+            .registry
+            .phones
+            .iter_mut()
+            .find(|remembered| remembered.id == known.id)
+            .expect("the known phone remained registered");
+        remembered.phone = phone.clone();
+        remembered.connect_address = Some(connect_address.to_string());
+        if inner.registry.selected.as_deref() == Some(serial) {
+            inner.registry.selected = Some(connect_address.to_string());
         }
+        let retargeted = inner
+            .state
+            .capture
+            .as_mut()
+            .filter(|capture| capture.phone.serial == serial)
+            .is_some_and(|capture| {
+                capture.phone = phone.clone();
+                true
+            });
+        if retargeted {
+            if let Some(settings) = inner
+                .state
+                .settings
+                .as_mut()
+                .filter(|settings| settings.phone == serial)
+            {
+                settings.phone = connect_address.to_string();
+            }
+        }
+        retargeted
+    };
+    save_registry(shared);
+    let listed = attached.iter().map(Into::into).collect();
+    if capture_retargeted {
+        publish_connection(
+            shared,
+            reconnecting_or(
+                shared,
+                Connection::Reconnecting {
+                    phone: phone.clone(),
+                },
+            ),
+            listed,
+        );
     }
     refresh_connection_locked(shared);
     if matches!(
@@ -833,6 +1208,7 @@ fn forget_phone(shared: &Shared, serial: &str) -> Result<(), (&'static str, Stri
             return Err(("no_such_phone", format!("no known phone {serial:?}")));
         };
         let forgotten = inner.registry.phones.remove(index);
+        inner.registry.settings.remove(&forgotten.id);
         if inner.registry.selected.as_deref() == Some(serial) {
             inner.registry.selected = None;
         }
@@ -871,13 +1247,7 @@ fn forget_phone(shared: &Shared, serial: &str) -> Result<(), (&'static str, Stri
 fn refresh_adb(shared: &Shared) -> bool {
     let _turn = transition();
     if !probe_adb() {
-        let state = State {
-            adb_ok: false,
-            connection: Connection::NoPhone,
-            attached: Vec::new(),
-            ..shared.lock().unwrap().state.clone()
-        };
-        publish(shared, state);
+        publish_adb_failure(shared);
         return false;
     }
     refresh_connection_locked(shared)
@@ -892,7 +1262,7 @@ fn select_phone(shared: &Shared, serial: &str) -> Result<(), (&'static str, Stri
         .registry
         .phones
         .iter()
-        .any(|known| known.phone.serial == serial);
+        .any(|known| known.phone.serial == serial && known.transport == Transport::Wireless);
     if !is_known && !attached.iter().any(|phone| phone.serial == serial) {
         // Say what *is* attached: the caller cannot always see it. A remembered
         // phone that is unplugged reports `NoPhone`, so this error is also how
@@ -1030,12 +1400,24 @@ fn apply_settings(shared: &Shared) -> Result<(), (&'static str, String)> {
         }
     }
 
+    let restart_position = running.as_ref().map_or(Ok(None), |(capture, _)| {
+        if capture.preview {
+            capture::preview_position().map(Some).map_err(|error| {
+                (
+                    "preview_failed",
+                    format!("could not locate the preview before Apply: {error}"),
+                )
+            })
+        } else {
+            Ok(shared.lock().unwrap().preview_position)
+        }
+    })?;
     let previous = view.applied.clone();
     let pending = view.pending.clone();
     persist_settings(shared, &phone.serial, pending.clone()).map_err(|error| {
         (
-            "settings_not_saved",
-            format!("could not save settings: {error}"),
+            "apply_not_persisted",
+            format!("could not persist Apply: {error}"),
         )
     })?;
 
@@ -1050,13 +1432,13 @@ fn apply_settings(shared: &Shared) -> Result<(), (&'static str, String)> {
         let _ = child.kill();
         let _ = child.wait();
     }
-    let (rounding, border_size) = shared.lock().unwrap().preview_style;
-    match capture::spawn(
+    let style = shared.lock().unwrap().state.preview_style.clone();
+    match spawn_replacement(
         &phone.serial,
-        &capture_state.node,
+        &capture_state,
         &pending,
-        rounding,
-        border_size,
+        &style,
+        restart_position,
     ) {
         Ok(child) => {
             shared.lock().unwrap().capture = Some(child);
@@ -1078,12 +1460,12 @@ fn apply_settings(shared: &Shared) -> Result<(), (&'static str, String)> {
         Err(error) => {
             let rejected = format!("{} ({error})", serde_json::to_string(&pending).unwrap());
             let persistence_error = persist_settings(shared, &phone.serial, previous.clone()).err();
-            match capture::spawn(
+            match spawn_replacement(
                 &phone.serial,
-                &capture_state.node,
+                &capture_state,
                 &previous,
-                rounding,
-                border_size,
+                &style,
+                restart_position,
             ) {
                 Ok(child) => {
                     shared.lock().unwrap().capture = Some(child);
@@ -1180,7 +1562,6 @@ pub fn run() -> std::io::Result<()> {
         state_dir: dir.clone(),
         capture: None,
         preview_position: None,
-        preview_style: (0, 1),
     }));
     // The first client, especially the one that socket-activated us, must not
     // observe a placeholder NoPhone state and exit before the watcher runs.

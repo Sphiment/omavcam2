@@ -9,6 +9,7 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -19,7 +20,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
-const PROTOCOL_VERSION: u32 = 3;
+const PROTOCOL_VERSION: u32 = 4;
 
 pub struct Fixture {
     dir: PathBuf,
@@ -147,6 +148,7 @@ impl Fixture {
              - 640x480\n",
         );
         fixture.script_preview_window([120, 80]);
+        fixture.script_monitors(&[[0, 0, 1920, 1080]]);
         fixture
     }
 
@@ -224,6 +226,7 @@ impl Fixture {
             stream,
             next_id: 0,
             last_state: Value::Null,
+            states: Vec::new(),
         }
     }
 
@@ -333,6 +336,19 @@ impl Fixture {
         }
     }
 
+    pub fn script_uncertain_consumer(&self, uncertain: bool) {
+        let process = self.dir.join("proc/998");
+        let fd = process.join("fd");
+        if fd.exists() {
+            fs::set_permissions(&fd, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let _ = fs::remove_dir_all(&process);
+        if uncertain {
+            fs::create_dir_all(&fd).unwrap();
+            fs::set_permissions(fd, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+    }
+
     pub fn script_output_for(&self, tool: &str, command: &str, output: &str) {
         fs::write(self.stub_dir.join(format!("{tool}.{command}.out")), output).unwrap();
     }
@@ -382,6 +398,22 @@ impl Fixture {
         )
         .unwrap();
     }
+
+    pub fn script_preview_absent(&self) {
+        fs::write(self.stub_dir.join("hyprctl.clients.out"), "[]").unwrap();
+    }
+
+    pub fn script_monitors(&self, monitors: &[[i64; 4]]) {
+        let monitors: Vec<Value> = monitors
+            .iter()
+            .map(|[x, y, width, height]| json!({"x": x, "y": y, "width": width, "height": height}))
+            .collect();
+        fs::write(
+            self.stub_dir.join("hyprctl.monitors.out"),
+            json!(monitors).to_string(),
+        )
+        .unwrap();
+    }
 }
 
 impl Drop for Fixture {
@@ -398,6 +430,8 @@ pub struct Client {
     /// The most recent pushed state, so a test that reads past one can still
     /// see it. The daemon publishes before it responds.
     pub last_state: Value,
+    /// Every whole state this client observed, including transient ones.
+    pub states: Vec<Value>,
 }
 
 impl Client {
@@ -408,6 +442,7 @@ impl Client {
         let msg: Value = serde_json::from_str(&line).unwrap();
         if msg["type"] == json!("state") {
             self.last_state = msg.clone();
+            self.states.push(msg["state"].clone());
         }
         msg
     }

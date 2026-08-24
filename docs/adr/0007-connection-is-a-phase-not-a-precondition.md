@@ -84,7 +84,7 @@ and a dead webcam mid-meeting.
 **Verified, and it costs nothing.** A consumer survives the writer being killed:
 it stays open, frames simply stop, and no error is raised — so applications go on
 showing their last decoded frame by themselves. The capability flags revert to
-output-only without evicting the consumer that is still attached. For anything
-that times out on stalled input, the `timeout` control keeps frames flowing; see
-ADR-0010. The one hard constraint is that the capture must resume at the **same
+output-only without evicting the consumer that is still attached, and
+`sustain_framerate` keeps repeating that last real frame (ADR-0010). The one
+hard constraint is that the capture must resume at the **same
 frame size**, or the consumer freezes permanently instead of resuming.

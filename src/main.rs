@@ -171,6 +171,9 @@ fn render(state: &State) -> String {
         ),
         Connection::Connecting { phone: p } => format!("phone: {} — connecting", phone(p)),
         Connection::Connected { phone: p } => format!("phone: {} — connected", phone(p)),
+        Connection::Reconnecting { phone: p } => {
+            format!("phone: {} — reconnecting; last frame held", phone(p))
+        }
         Connection::NeedsPairing => "phone: wireless pairing needed\nopen Developer options → Wireless debugging → Pair device with pairing code; the pairing address beside the six-digit code and the connect address on the main screen are different\nthen run: omavcam pair <pair-address> <code> <connect-address>".to_string(),
         Connection::PairingFailed { reason } => format!(
             "phone: wireless pairing failed — {}",
@@ -208,7 +211,7 @@ fn render(state: &State) -> String {
         || "settings: unavailable".to_string(),
         |settings| {
             let pending = &settings.pending;
-            format!(
+            let mut rendered = format!(
                 "settings: lens {}, {}, {}fps, {}, zoom {}{}{}",
                 pending.lens,
                 pending.resolution,
@@ -225,7 +228,28 @@ fn render(state: &State) -> String {
                     .as_ref()
                     .map(|message| format!("\nrejected: {message}"))
                     .unwrap_or_default()
-            )
+            );
+            for lens in &settings.lenses {
+                rendered += &format!(
+                    "\n  lens {} — {}, sensor {}; resolutions {}; fps {}; zoom [{}, {}]",
+                    lens.id,
+                    lens.facing,
+                    lens.sensor_size,
+                    lens.resolutions.join(", "),
+                    lens.frame_rates
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    lens.zoom_min,
+                    lens.zoom_max,
+                );
+            }
+            rendered += &format!(
+                "\n  offered resolutions: {}",
+                settings.offered_resolutions.join(", ")
+            );
+            rendered
         },
     );
     format!(

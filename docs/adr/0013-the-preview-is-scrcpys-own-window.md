@@ -56,15 +56,23 @@ phone.
 The preview cannot be closed and reopened, because the window belongs to the
 capture process — closing it kills scrcpy and takes the webcam with it,
 mid-call. Hiding is a compositor operation instead. Verified: moving the window
-off-screen and back leaves the node feeding throughout.
-
-```
-hl.dsp.window.move({ window = "title:^(omavcam preview)$", x = -2000, y = -2000 })
-```
+wholly outside the complete monitor bounds and back leaves the node feeding
+throughout. The location is derived from the leftmost monitor and the preview
+width; a fixed negative coordinate can still be visible on a monitor arranged
+to the left of the primary one.
 
 **The window must therefore be made unclosable, or closing it must be caught and
 turned into a hide.** A user clicking the X on their preview must not lose their
 camera in a meeting.
+
+When the phone disappears, scrcpy and its window necessarily disappear too. If
+the preview was visible, the panel briefly substitutes a status-only
+`FloatingWindow` saying that it is reconnecting. It decodes no video and never
+opens the virtual camera, so there is still one decoder, one writer, and no
+competing reader. The status window goes away before the replacement scrcpy
+window returns at the prior position, or the last position recorded before an
+already-unmapped window vanished, and visibility. A deliberately hidden preview
+stays hidden throughout.
 
 ## Consequences
 

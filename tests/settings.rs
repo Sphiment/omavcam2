@@ -75,6 +75,74 @@ fn malformed_camera_dimensions_are_reported_without_killing_the_daemon() {
 }
 
 #[test]
+fn malformed_camera_characteristics_are_rejected() {
+    for capabilities in [
+        "--camera-id=0 (, 1920x1080, fps={30}, zoom-range=[1, 8])\n  - 1280x720\n",
+        "--camera-id=0 (back, 1920x1080, fps={0}, zoom-range=[1, 8])\n  - 1280x720\n",
+        "--camera-id=0 (back, 1920x1080, fps={30}, zoom-range=[NaN, 8])\n  - 1280x720\n",
+        "--camera-id=0 (back, 1920x1080, fps={30}, zoom-range=[8, 1])\n  - 1280x720\n",
+        "--camera-id=0 (back, 1920x1080, fps={30}, zoom-range=[-1, 8])\n  - 1280x720\n",
+        "--camera-id=0 (back, 1x1080, fps={30}, zoom-range=[1, 8])\n  - 1280x720\n",
+        "--camera-id=0 (back, 1920x1080, fps={30}, zoom-range=[1, 8])\n  - 1x1\n",
+    ] {
+        let f = Fixture::start();
+        f.script_camera_capabilities(capabilities);
+        f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
+        let mut client = f.connect();
+        client.await_state("connected phone", |state| {
+            state["connection"]["state"] == json!("connected")
+        });
+        assert!(client.state()["settings"].is_null(), "{capabilities}");
+    }
+}
+
+#[test]
+fn switching_phones_clears_stale_settings_when_the_new_probe_fails() {
+    let (f, mut client) = ready();
+    assert_eq!(client.state()["settings"]["phone"], json!(PIXEL));
+    f.script_devices(&[
+        (PIXEL, "device", Some("Pixel_7")),
+        (GALAXY, "device", Some("Galaxy_S21")),
+    ]);
+    f.script_exit_for("scrcpy", "list", 1);
+
+    assert_eq!(
+        client.request_with("select", json!({"serial": GALAXY}))["ok"],
+        json!(true)
+    );
+    assert_eq!(
+        client.state()["connection"]["phone"]["serial"],
+        json!(GALAXY)
+    );
+    assert!(client.state()["settings"].is_null());
+}
+
+#[test]
+fn adb_failure_clears_idle_settings_but_preserves_the_reconnecting_phone() {
+    let (f, mut client) = ready();
+    f.script_exit_for("adb", "devices", 1);
+
+    client.request("refresh");
+
+    assert_eq!(client.state()["connection"]["state"], json!("no_phone"));
+    assert!(client.state()["settings"].is_null());
+
+    f.script_exit_for("adb", "devices", 0);
+    client.request("refresh");
+    client.await_state("settings to return", |state| {
+        state["settings"]["phone"] == json!(PIXEL)
+    });
+    assert_eq!(client.request("start")["ok"], json!(true));
+    f.script_exit_for("adb", "start-server", 1);
+
+    client.request("refresh");
+
+    assert_eq!(client.state()["connection"]["state"], json!("reconnecting"));
+    assert_eq!(client.state()["settings"]["phone"], json!(PIXEL));
+    assert_eq!(client.state()["capture"]["phone"]["serial"], json!(PIXEL));
+}
+
+#[test]
 fn changes_are_pending_until_applied_and_discard_leaves_capture_alone() {
     let (f, mut client) = ready();
     client.request("start");
@@ -233,6 +301,79 @@ fn size_change_is_refused_for_a_consumer_but_live_safe_apply_restarts() {
 }
 
 #[test]
+fn uncertain_consumer_inspection_refuses_a_size_change() {
+    let (f, mut client) = ready();
+    client.request("start");
+    client.await_state("capture", |state| !state["capture"].is_null());
+    f.await_argv("scrcpy", 1);
+    f.script_uncertain_consumer(true);
+    f.script_exit("v4l2-ctl", 2);
+    set(&mut client, "resolution", json!("1920x1080"));
+
+    let refused = client.request("apply");
+
+    f.script_uncertain_consumer(false);
+    f.script_exit("v4l2-ctl", 0);
+    assert_eq!(refused["error"]["code"], json!("consumer_check_failed"));
+    assert_eq!(f.await_argv("scrcpy", 1).len(), 1);
+}
+
+#[test]
+fn bounded_probe_can_prove_an_opaque_process_is_not_a_consumer() {
+    let (f, mut client) = ready();
+    client.request("start");
+    client.await_state("capture", |state| !state["capture"].is_null());
+    f.await_argv("scrcpy", 1);
+    f.script_uncertain_consumer(true);
+    set(&mut client, "resolution", json!("1920x1080"));
+
+    assert_eq!(client.request("apply")["ok"], json!(true));
+
+    f.script_uncertain_consumer(false);
+    assert_eq!(f.await_argv("scrcpy", 2).len(), 2);
+    assert_eq!(client.state()["capture"]["size"], json!("1920x1080"));
+}
+
+#[test]
+fn an_opaque_consumer_probe_cannot_hang_apply() {
+    let (f, mut client) = ready();
+    client.request("start");
+    client.await_state("capture", |state| !state["capture"].is_null());
+    f.await_argv("scrcpy", 1);
+    f.script_uncertain_consumer(true);
+    f.script_hold("v4l2-ctl");
+    set(&mut client, "resolution", json!("1920x1080"));
+
+    let refused = client.request("apply");
+
+    f.script_release("v4l2-ctl");
+    f.script_uncertain_consumer(false);
+    assert_eq!(refused["error"]["code"], json!("consumer_check_failed"));
+    assert!(refused["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("did not finish within"));
+    assert_eq!(f.await_argv("scrcpy", 1).len(), 1);
+}
+
+#[test]
+fn cli_status_enumerates_camera_capabilities() {
+    let (f, _client) = ready();
+
+    let output = String::from_utf8(f.cli(&["status"]).stdout).unwrap();
+
+    for detail in [
+        "lens 0 — back, sensor 4080x3060",
+        "resolutions 1920x1080, 1280x720, 640x480",
+        "fps 15, 20, 24, 30",
+        "zoom [1, 8]",
+        "offered resolutions: 1920x1080, 1280x720",
+    ] {
+        assert!(output.contains(detail), "missing {detail:?}: {output}");
+    }
+}
+
+#[test]
 fn cli_sets_applies_and_discards_settings() {
     let (f, mut client) = ready();
 
@@ -289,4 +430,67 @@ fn failed_apply_restarts_the_previous_capture_and_reports_the_rejection() {
     let calls = f.await_argv("scrcpy", 3);
     assert!(calls[1].contains("--camera-zoom=2"), "{calls:?}");
     assert!(calls[2].contains("--camera-zoom=1"), "{calls:?}");
+}
+
+#[test]
+fn apply_preserves_preview_visibility_and_position() {
+    let (f, mut client) = ready();
+    f.script_preview_window([333, 222]);
+    client.request_with("start", json!({"rounding": 8, "border_size": 2}));
+    client.await_state("capture", |state| !state["capture"].is_null());
+    f.await_argv("scrcpy", 1);
+
+    set(&mut client, "zoom", json!(2.0));
+    assert_eq!(client.request("apply")["ok"], json!(true));
+    assert_eq!(client.state()["capture"]["preview"], json!(true));
+    f.await_argv("scrcpy", 2);
+    let argv = f.argv();
+    let replacement = argv
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with("scrcpy "))
+        .nth(1)
+        .unwrap()
+        .0;
+    assert!(
+        argv[..replacement].iter().rev().any(|line| {
+            line.starts_with("hyprctl eval ")
+                && line.contains("omavcam-preview")
+                && line.contains("move = { 333, 222 }")
+        }),
+        "Apply had no saved-position compositor rule: {argv:?}"
+    );
+
+    client.request_with(
+        "preview",
+        json!({"visible": false, "rounding": 8, "border_size": 2}),
+    );
+    set(&mut client, "zoom", json!(3.0));
+    assert_eq!(client.request("apply")["ok"], json!(true));
+    assert_eq!(client.state()["capture"]["preview"], json!(false));
+    f.await_argv("scrcpy", 3);
+    let argv = f.argv();
+    let replacement = argv
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with("scrcpy "))
+        .nth(2)
+        .unwrap()
+        .0;
+    assert!(
+        argv[..replacement].iter().rev().any(|line| {
+            line.starts_with("hyprctl eval ")
+                && line.contains("omavcam-preview")
+                && line.contains("move = { -641, 0 }")
+        }),
+        "Apply mapped the hidden preview without an offscreen compositor rule: {argv:?}"
+    );
+
+    client.request_with(
+        "preview",
+        json!({"visible": true, "rounding": 8, "border_size": 2}),
+    );
+    assert!(f.argv().iter().rev().any(|line| {
+        line.contains("hl.dsp.window.move") && line.contains("x = 333") && line.contains("y = 222")
+    }));
 }

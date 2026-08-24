@@ -79,6 +79,7 @@ fn start_launches_a_capture_against_the_selected_phone() {
         "no_focus = true",
         "no_initial_focus = true",
         "keep_aspect_ratio = true",
+        "center = true",
         "no_close_for = 2147483647",
     ] {
         assert!(
@@ -88,10 +89,12 @@ fn start_launches_a_capture_against_the_selected_phone() {
         );
     }
     assert!(
-        argv.iter()
-            .any(|line| line.contains("hl.dsp.window.center")),
-        "the window was not placed after it appeared: {argv:?}"
+        argv.iter().any(|line| {
+            line.starts_with("hyprctl eval ") && line.contains("omavcam reconnecting")
+        }),
+        "the transient reconnect preview has no rule: {argv:?}",
     );
+    assert!(!calls[0].contains("--window-x"), "{calls:?}");
     let probes = argv
         .iter()
         .filter(|line| line.starts_with("hyprctl clients "))
@@ -110,6 +113,7 @@ fn start_launches_a_capture_against_the_selected_phone() {
 #[test]
 fn preview_hides_and_returns_without_disturbing_the_capture() {
     let (f, mut client) = ready();
+    f.script_monitors(&[[-3840, 0, 3840, 2160], [0, 0, 1920, 1080]]);
     client.request_with("start", json!({"rounding": 8, "border_size": 2}));
     client.await_state("the preview to be visible", |state| {
         state["capture"]["preview"] == json!(true)
@@ -128,7 +132,7 @@ fn preview_hides_and_returns_without_disturbing_the_capture() {
     assert!(
         f.argv()
             .iter()
-            .any(|line| { line.contains("hl.dsp.window.move") && line.contains("x = -2000") }),
+            .any(|line| { line.contains("hl.dsp.window.move") && line.contains("x = -4481") }),
         "the preview was not moved off-screen: {:?}",
         f.argv()
     );
@@ -238,7 +242,7 @@ fn the_virtual_cameras_controls_are_set_before_anything_writes_to_it() {
         .unwrap();
     assert!(ctl < scrcpy, "the controls are set first: {argv:?}");
     assert!(argv[ctl].contains("/dev/video42"), "{}", argv[ctl]);
-    for control in ["keep_format=0", "sustain_framerate=1", "timeout=1000"] {
+    for control in ["keep_format=0", "sustain_framerate=1", "timeout=0"] {
         assert!(
             argv[ctl].contains(control),
             "{control} unset: {}",
@@ -403,18 +407,247 @@ fn selecting_another_phone_stops_the_running_capture() {
 }
 
 #[test]
-fn a_capture_dying_on_its_own_moves_the_state_to_stopped() {
+fn selecting_an_absent_remembered_wired_phone_does_not_stop_capture() {
+    let (f, mut client) = ready();
+    f.script_devices(&[
+        (PIXEL, "device", Some("Pixel_7")),
+        (GALAXY, "device", Some("Galaxy_S21")),
+    ]);
+    assert_eq!(
+        client.request_with("select", json!({"serial": GALAXY}))["ok"],
+        json!(true)
+    );
+    assert_eq!(
+        client.request_with("select", json!({"serial": PIXEL}))["ok"],
+        json!(true)
+    );
+    client.request("start");
+    client.await_state("the capture to run", running);
+    f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
+
+    let response = client.request_with("select", json!({"serial": GALAXY}));
+
+    assert_eq!(response["error"]["code"], json!("no_such_phone"));
+    assert_eq!(client.state()["capture"]["phone"]["serial"], json!(PIXEL));
+    assert_eq!(f.await_argv("scrcpy", 1).len(), 1);
+}
+
+#[test]
+fn a_capture_dying_on_its_own_is_restarted_without_dropping_the_logical_capture() {
+    let (f, mut client) = ready();
+    client.request("start");
+    let before = client.await_state("the capture to be running", running);
+
+    // Model a writer dying before adb's next device scan.
+    f.script_preview_absent();
+    f.script_release("scrcpy");
+    client.await_state("the capture to reconnect", |state| {
+        state["connection"]["state"] == json!("reconnecting")
+    });
+    assert_eq!(client.state()["capture"]["size"], before["capture"]["size"]);
+    assert_eq!(client.state()["capture"]["preview"], json!(true));
+    assert!(
+        f.argv().iter().any(|line| {
+            line.starts_with("hyprctl eval ")
+                && line.contains("omavcam reconnecting")
+                && line.contains("move = { 120, 80 }")
+        }),
+        "the reconnect status did not inherit the preview position: {:?}",
+        f.argv()
+    );
+
+    f.script_hold("scrcpy");
+    f.script_preview_window([120, 80]);
+    client.await_state("the capture to resume", |state| {
+        state["connection"]["state"] == json!("connected")
+    });
+    f.await_argv("scrcpy", 2);
+    assert_eq!(client.state()["capture"]["preview"], json!(true));
+    let argv = f.argv();
+    let replacement = argv
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with("scrcpy "))
+        .nth(1)
+        .unwrap()
+        .0;
+    let hidden = argv[..replacement]
+        .iter()
+        .rposition(|line| {
+            line.contains("hl.dsp.window.move") && line.contains("omavcam reconnecting")
+        })
+        .expect("the reconnect status was not hidden before replacement");
+    let hidden_rule = argv[..hidden]
+        .iter()
+        .rposition(|line| {
+            line.starts_with("hyprctl eval ")
+                && line.contains("omavcam reconnecting")
+                && line.contains("move = { -641, 0 }")
+        })
+        .expect("the reconnect status had no persistent offscreen rule");
+    let preview_rule = argv[..replacement]
+        .iter()
+        .rposition(|line| {
+            line.starts_with("hyprctl eval ")
+                && line.contains("omavcam-preview")
+                && line.contains("move = { 120, 80 }")
+        })
+        .expect("the replacement preview had no saved-position rule");
+    assert!(hidden_rule < hidden && hidden < preview_rule && preview_rule < replacement);
+    assert!(
+        argv[hidden + 1..replacement]
+            .iter()
+            .all(|line| !(line.starts_with("hyprctl eval ")
+                && line.contains("omavcam reconnecting"))),
+        "the hidden reconnect status was remapped before replacement: {argv:?}"
+    );
+}
+
+#[test]
+fn a_hidden_preview_maps_offscreen_when_the_writer_is_replaced() {
+    let (f, mut client) = ready();
+    client.request("start");
+    client.request_with("preview", json!({"visible": false}));
+    f.script_devices(&[]);
+    client.request("refresh");
+    f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
+    client.request("refresh");
+    client.await_state("the hidden capture to resume", |state| {
+        state["connection"]["state"] == json!("connected")
+    });
+
+    f.await_argv("scrcpy", 2);
+    let argv = f.argv();
+    let replacement = argv
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with("scrcpy "))
+        .nth(1)
+        .unwrap()
+        .0;
+    assert!(
+        argv[..replacement].iter().rev().any(|line| {
+            line.starts_with("hyprctl eval ")
+                && line.contains("omavcam-preview")
+                && line.contains("move = { -641, 0 }")
+        }),
+        "the hidden replacement had no offscreen compositor rule: {argv:?}"
+    );
+    assert_eq!(client.state()["capture"]["preview"], json!(false));
+}
+
+#[test]
+fn a_failed_replacement_never_claims_the_capture_is_connected() {
+    let f = Fixture::slow_poll();
+    f.script_hold("scrcpy");
+    f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
+    let mut client = f.connect();
+    client.request("refresh");
+    client.await_state("the phone to connect", |state| {
+        state["connection"]["state"] == json!("connected")
+    });
+    assert_eq!(client.request("start")["ok"], json!(true));
+
+    f.script_devices(&[]);
+    client.request("refresh");
+    assert_eq!(client.state()["connection"]["state"], json!("reconnecting"));
+
+    f.script_release("scrcpy");
+    f.script_exit("scrcpy", 2);
+    f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
+    let before = client.states.len();
+    client.request("refresh");
+
+    assert_eq!(client.state()["connection"]["state"], json!("reconnecting"));
+    assert!(
+        client.states[before..]
+            .iter()
+            .all(|state| state["connection"]["state"] != json!("connected")),
+        "a dead replacement was briefly advertised as connected: {:?}",
+        &client.states[before..]
+    );
+}
+
+#[test]
+fn losing_and_returning_wired_phone_keeps_the_capture_and_applied_frame_size() {
+    let (f, mut client) = ready();
+    client.request("start");
+    let before = client.await_state("the capture to be running", running);
+    assert_eq!(before["capture"]["size"], json!("1280x720"));
+    assert_eq!(
+        client.request_with(
+            "set",
+            json!({"setting": "resolution", "value": "1920x1080"}),
+        )["ok"],
+        json!(true)
+    );
+    f.script_consumer(true);
+
+    f.script_devices(&[(GALAXY, "device", Some("Galaxy_S21"))]);
+    let lost = client.await_state("the selected phone to reconnect", |state| {
+        state["connection"]["state"] == json!("reconnecting")
+    });
+    assert_eq!(lost["connection"]["phone"]["serial"], json!(PIXEL));
+    assert_eq!(lost["capture"], before["capture"]);
+    assert_eq!(lost["attached"][0]["phone"]["serial"], json!(GALAXY));
+
+    f.script_devices(&[
+        (GALAXY, "device", Some("Galaxy_S21")),
+        (PIXEL, "device", Some("Pixel_7")),
+    ]);
+    let resumed = client.await_state("the same capture to resume", |state| {
+        state["connection"]["state"] == json!("connected")
+            && state["capture"]["phone"]["serial"] == json!(PIXEL)
+    });
+    assert_eq!(resumed["capture"]["size"], json!("1280x720"));
+    let calls = f.await_argv("scrcpy", 2);
+    assert!(calls[1].contains(&format!("-s {PIXEL}")), "{calls:?}");
+    assert!(calls[1].contains("--camera-size=1280x720"), "{calls:?}");
+    assert!(!calls.iter().any(|call| call.contains(GALAXY)), "{calls:?}");
+}
+
+#[test]
+fn stop_while_reconnecting_cancels_the_restart_and_releases_the_node() {
     let (f, mut client) = ready();
     client.request("start");
     client.await_state("the capture to be running", running);
+    f.script_devices(&[]);
+    client.await_state("the capture to reconnect", |state| {
+        state["connection"]["state"] == json!("reconnecting")
+    });
 
-    // scrcpy exits without being asked to — the phone went, or the process was
-    // killed. A switch that still claims to be on is worse than no switch.
-    f.script_release("scrcpy");
+    assert_eq!(client.request("stop")["ok"], json!(true));
+    assert!(client.state()["capture"].is_null());
+    assert_ne!(client.state()["connection"]["state"], json!("reconnecting"));
+    assert!(client.states.iter().all(|state| {
+        !(state["capture"].is_null() && state["connection"]["state"] == json!("reconnecting"))
+    }));
+    f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
+    client.await_state("the phone to reconnect without capture", |state| {
+        state["connection"]["state"] == json!("connected")
+    });
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(f.await_argv("scrcpy", 1).len(), 1);
+}
 
-    client.await_state("the capture to be stopped", stopped);
-    let stdout = String::from_utf8(f.cli(&["status"]).stdout).unwrap();
-    assert!(stdout.contains("capture: none"), "{stdout}");
+#[test]
+fn applied_preview_style_is_part_of_whole_state_and_revision() {
+    let (_f, mut client) = ready();
+    let started = client.request_with("start", json!({"rounding": 8, "border_size": 2}));
+    assert_eq!(
+        client.state()["preview_style"],
+        json!({"rounding": 8, "border_size": 2})
+    );
+
+    let restyled = client.request_with(
+        "preview",
+        json!({"visible": true, "rounding": 9, "border_size": 3}),
+    );
+    assert!(restyled["rev"].as_u64() > started["rev"].as_u64());
+    assert_eq!(
+        client.state()["preview_style"],
+        json!({"rounding": 9, "border_size": 3})
+    );
 }
 
 #[test]
@@ -518,6 +751,7 @@ fn starting_again_after_the_capture_died_launches_a_new_one() {
     f.await_argv("scrcpy", 1);
     f.script_release("scrcpy");
     f.await_argv("released", 1);
+    std::thread::sleep(std::time::Duration::from_millis(50));
     f.script_hold("scrcpy");
 
     let response = client.request("start");

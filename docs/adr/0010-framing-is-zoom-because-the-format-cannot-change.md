@@ -123,11 +123,10 @@ than expected: the consumer survives the writer's death untouched, and most
 applications keep displaying their last decoded frame, which is the desired
 behaviour with no work at all.
 
-For applications that time out on stalled input, `timeout` delivers frames
-regardless — verified: with `timeout=1000` set, the consumer kept receiving
-frames after the writer was killed. `timeout_image_io` is a write-only button
-that loads a specific image into that buffer, so a real last frame can be shown
-rather than the default black.
+`sustain_framerate` keeps rereading the last queued frame after the writer is
+gone, so consumers continue receiving the actual last phone frame. `timeout`
+stays disabled: without a separately loaded `timeout_image_io` buffer it would
+replace that frame with v4l2loopback's default black image.
 
 **These are per-device V4L2 controls, not module parameters** — settable at
 runtime with `v4l2-ctl -c`, by the ordinary user, with no root and without being

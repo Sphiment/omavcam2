@@ -173,19 +173,19 @@ open cameras is system-wide, so unlocking that way while a capture is running
 takes the camera out from under it — unlock with a PIN instead, or start the
 capture afterwards.
 
-scrcpy dying on its own — the phone unplugged, the process killed — moves the
-state to stopped, so the switch never claims to be on while nothing is feeding.
-An application already watching survives that: frames stop, it keeps showing its
-last one, and a restart at the **same** frame size resumes. A restart at a
-different size would freeze it permanently and silently, so Apply refuses
-resolution or phone-side crop changes while another application has the virtual
-camera open. Same-size changes restart safely. If the new capture fails, Apply
-relaunches the previous settings and reports what was rejected (ADR-0010).
+If scrcpy dies, the logical capture moves to `Reconnecting` and keeps the same
+phone and applied settings. An application already watching survives that:
+frames stop, it keeps showing its last one, and the daemon resumes at the
+**same** frame size when the phone answers again. A different size would freeze
+the consumer permanently and silently, so Apply refuses resolution or
+phone-side crop changes while another application has the virtual camera open.
+Same-size changes restart safely. If the new capture fails, Apply relaunches
+the previous settings and reports what was rejected (ADR-0010).
 
 The daemon leaves `keep_format=0`: an application already reading the camera
 pins the format by itself, while an idle node must remain free to accept the
-size changes ticket #9 allows. `sustain_framerate` and `timeout` keep consumers
-that dislike stalled input attached across a same-size restart.
+size changes ticket #9 allows. `sustain_framerate` repeats the last real frame
+while the writer reconnects; `timeout` stays off because its default is black.
 
 The same scrcpy process also draws the floating preview. It is launched with a
 known title and `--no-control`, so clicks and typing are never forwarded to the

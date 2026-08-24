@@ -3,7 +3,6 @@
 //! node is, how it must be configured, and what scrcpy is launched with.
 
 use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -208,7 +207,6 @@ pub fn has_consumer(node: &str, writer_pid: u32) -> std::io::Result<bool> {
     // ponytail: a /proc scan on the rare size-changing Apply; track fd events
     // only if machines with thousands of processes make this measurable.
     let proc = PathBuf::from(std::env::var("OMAVCAM_PROC_DIR").unwrap_or_else(|_| "/proc".into()));
-    let uid = fs::metadata("/proc/self")?.uid();
     let mut uncertain = false;
     for process in fs::read_dir(&proc)? {
         let process = match process {
@@ -225,24 +223,10 @@ pub fn has_consumer(node: &str, writer_pid: u32) -> std::io::Result<bool> {
         if pid == writer_pid {
             continue;
         }
-        let metadata = match process.metadata() {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => {
-                uncertain = true;
-                continue;
-            }
-        };
-        // Scan readable foreign processes too: an actual fd is conclusive.
-        // Merely being unable to inspect a different user's process is not,
-        // because logind grants the node to this session. Same-user
-        // uncertainty still needs the kernel probe below.
-        let same_user = metadata.uid() == uid;
         let fd_path = process.path().join("fd");
         let fds = match fs::read_dir(&fd_path) {
             Ok(fds) => fds,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) if !same_user => continue,
             Err(_) => {
                 uncertain = true;
                 continue;
@@ -252,7 +236,6 @@ pub fn has_consumer(node: &str, writer_pid: u32) -> std::io::Result<bool> {
             let fd = match fd {
                 Ok(fd) => fd,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(_) if !same_user => continue,
                 Err(_) => {
                     uncertain = true;
                     continue;
@@ -262,7 +245,6 @@ pub fn has_consumer(node: &str, writer_pid: u32) -> std::io::Result<bool> {
                 Ok(target) if target == std::path::Path::new(node) => return Ok(true),
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) if !same_user => {}
                 Err(_) => uncertain = true,
             }
         }
@@ -271,11 +253,11 @@ pub fn has_consumer(node: &str, writer_pid: u32) -> std::io::Result<bool> {
         return Ok(false);
     }
 
-    // Some same-user sandbox processes deliberately hide their fd directory.
-    // Ask the device whether a second reader can allocate buffers so those
-    // unrelated processes do not block Apply. `command::output` bounds a
-    // stalled stream probe; any inconclusive answer remains an error rather
-    // than becoming "no consumer".
+    // Sandboxed and foreign processes may hide their fd directory. Ask the
+    // device whether a second reader can allocate buffers so unrelated opaque
+    // processes do not block Apply. `command::output` bounds a stalled stream
+    // probe; any inconclusive answer remains an error rather than becoming
+    // "no consumer".
     let mut process = Command::new("v4l2-ctl");
     process.args([
         "-d",

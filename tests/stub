@@ -5,6 +5,7 @@
 #
 #   $OMAVCAM_STUB_LOG    appended one line per call: "<tool> <args...>"
 #   $OMAVCAM_STUB_DIR    <tool>.out  printed on stdout, if present
+#                        <tool>.err  printed on stderr, if present
 #                        <tool>.code exit status, if present
 #                        <tool>.hold stay running while this file exists;
 #                        "released <tool>" is logged once it goes
@@ -22,6 +23,8 @@ command=$1
 specific="$OMAVCAM_STUB_DIR/$tool.$command"
 [ -f "$specific.out" ] && cat "$specific.out"
 [ ! -f "$specific.out" ] && [ -f "$OMAVCAM_STUB_DIR/$tool.out" ] && cat "$OMAVCAM_STUB_DIR/$tool.out"
+[ -f "$specific.err" ] && cat "$specific.err" >&2
+[ ! -f "$specific.err" ] && [ -f "$OMAVCAM_STUB_DIR/$tool.err" ] && cat "$OMAVCAM_STUB_DIR/$tool.err" >&2
 if [ "$tool" = v4l2-ctl ] && [ -f "$OMAVCAM_STUB_DIR/capture.pid" ]; then
   capture_pid=$(cat "$OMAVCAM_STUB_DIR/capture.pid")
   kill -0 "$capture_pid" 2>/dev/null && printf 'Video Capture\n'

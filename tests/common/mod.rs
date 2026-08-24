@@ -301,6 +301,10 @@ impl Fixture {
         fs::write(self.stub_dir.join(format!("{tool}.code")), code.to_string()).unwrap();
     }
 
+    pub fn script_stderr(&self, tool: &str, output: &str) {
+        fs::write(self.stub_dir.join(format!("{tool}.err")), output).unwrap();
+    }
+
     pub fn script_exit_for(&self, tool: &str, command: &str, code: i32) {
         fs::write(
             self.stub_dir.join(format!("{tool}.{command}.code")),

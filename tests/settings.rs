@@ -182,6 +182,16 @@ fn uncertain_consumer_detection_refuses_a_size_change() {
     assert_eq!(f.await_argv("scrcpy", 1).len(), 1, "capture was untouched");
 
     f.script_unknown_consumer(true);
+    f.script_stderr("v4l2-ctl", "VIDIOC_REQBUFS: Device or resource busy\n");
+    f.script_exit("v4l2-ctl", 2);
+    let response = client.request("apply");
+    f.script_unknown_consumer(false);
+    f.script_stderr("v4l2-ctl", "");
+    f.script_exit("v4l2-ctl", 0);
+    assert_eq!(response["error"]["code"], json!("camera_in_use"));
+    assert_eq!(f.await_argv("scrcpy", 1).len(), 1, "capture was untouched");
+
+    f.script_unknown_consumer(true);
     f.script_hold("v4l2-ctl");
     let response = client.request("apply");
     f.script_release("v4l2-ctl");

@@ -6,16 +6,18 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::io::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::capture;
 use crate::phones::{self, Registry};
 use crate::protocol::{
-    error_message, ok_message, socket_path, state_message, Connection, State, MAX_MESSAGE, VERSION,
+    error_message, ok_message, socket_path, state_message, Capture, Connection, State, MAX_MESSAGE,
+    VERSION,
 };
 
 /// How often the daemon asks adb what is attached. adb has no way to tell us —
@@ -42,6 +44,9 @@ struct Daemon {
     next_client: u64,
     state_dir: PathBuf,
     registry: Registry,
+    /// The running scrcpy, if there is one. The state's `capture` is what this
+    /// looks like to a client; the two are set together.
+    capture: Option<Child>,
 }
 
 type Shared = Arc<Mutex<Daemon>>;
@@ -136,6 +141,100 @@ fn publish_connection(shared: &Shared, connection: Connection) {
     publish(shared, state);
 }
 
+fn publish_capture(shared: &Shared, capture: Option<Capture>) {
+    let state = State {
+        capture,
+        ..shared.lock().unwrap().state.clone()
+    };
+    publish(shared, state);
+}
+
+/// Launch a capture against the connected phone. Returns the error code and
+/// message for a client, or nothing when it started.
+fn start_capture(shared: &Shared) -> Result<(), (&'static str, String)> {
+    // Answer from what is true now, not from whatever the last poll saw: the
+    // phone may have gone, and the capture may already have died with it.
+    refresh_connection(shared);
+    reap_capture(shared);
+    if shared.lock().unwrap().capture.is_some() {
+        return Ok(());
+    }
+
+    let phone = match shared.lock().unwrap().state.connection.clone() {
+        Connection::Connected { phone } => phone,
+        other => return Err(("no_phone", refusal_reason(&other))),
+    };
+    // The node is only looked up, never loaded: a `systemd --user` service has
+    // no capabilities to load a module with (ADR-0008).
+    let node = capture::find_node().map_err(|e| ("no_virtual_camera", e))?;
+    capture::set_controls(&node);
+
+    match capture::spawn(&phone.serial, &node) {
+        Ok(child) => {
+            shared.lock().unwrap().capture = Some(child);
+            publish_capture(
+                shared,
+                Some(Capture {
+                    phone,
+                    node,
+                    size: capture::SIZE.to_string(),
+                }),
+            );
+            Ok(())
+        }
+        Err(e) => Err((
+            "capture_failed",
+            format!("could not launch scrcpy: {e}; is it installed?"),
+        )),
+    }
+}
+
+/// Why a capture cannot start, in the words the connection is already using.
+fn refusal_reason(connection: &Connection) -> String {
+    match connection {
+        Connection::Unselected { available } => format!(
+            "{} phones are attached and none is selected; choose one with: omavcam select <serial>",
+            available.len()
+        ),
+        Connection::Unauthorised { phone } => format!(
+            "{} has not accepted the debugging prompt; accept it on the phone",
+            phone.name
+        ),
+        Connection::Connecting { phone } => format!("still connecting to {}", phone.name),
+        // No phone at all, and nothing to select from.
+        _ => "no phone is attached; plug one in and select it with: omavcam select <serial>"
+            .to_string(),
+    }
+}
+
+/// End the capture. Stopping one that is not running is a no-op: the switch
+/// reads off either way.
+fn stop_capture(shared: &Shared) {
+    if let Some(mut child) = shared.lock().unwrap().capture.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    publish_capture(shared, None);
+}
+
+/// scrcpy dying on its own — the phone unplugged, the process killed — must
+/// leave a switch that says off rather than one that claims to be on.
+fn reap_capture(shared: &Shared) {
+    let exited = {
+        let mut inner = shared.lock().unwrap();
+        match inner.capture.as_mut().map(Child::try_wait) {
+            Some(Ok(Some(_))) => true,
+            // A capture we cannot ask about is one we can no longer manage.
+            Some(Err(_)) => true,
+            _ => false,
+        }
+    };
+    if exited {
+        shared.lock().unwrap().capture = None;
+        publish_capture(shared, None);
+    }
+}
+
 /// Remember which phone is in use, so choosing is a one-time act.
 fn remember_selection(shared: &Shared, serial: String) {
     let mut inner = shared.lock().unwrap();
@@ -186,14 +285,18 @@ pub fn run() -> std::io::Result<()> {
         next_client: 0,
         registry: phones::load(&dir),
         state_dir: dir.clone(),
+        capture: None,
     }));
     eprintln!("omavcam: listening, state dir {}", dir.display());
 
     // The world changes without anyone asking: a phone is plugged in, or
-    // unplugged mid-call. Nothing polls the daemon, so the daemon polls adb.
+    // unplugged mid-call, or scrcpy dies. Nothing polls the daemon, so the
+    // daemon polls adb — and reaps the capture on the same pass rather than
+    // running a thread of its own for one `try_wait`.
     let watcher = Arc::clone(&shared);
     thread::spawn(move || loop {
         refresh_connection(&watcher);
+        reap_capture(&watcher);
         thread::sleep(poll_interval());
     });
 
@@ -341,6 +444,14 @@ fn handle(shared: &Shared, line: &[u8]) -> String {
             remember_selection(shared, serial.to_string());
             // Answer with the state the choice produced, not the one before it.
             refresh_connection(shared);
+            ok_message(&id, current_rev())
+        }
+        Some("start") => match start_capture(shared) {
+            Ok(()) => ok_message(&id, current_rev()),
+            Err((code, message)) => error_message(&id, current_rev(), code, &message),
+        },
+        Some("stop") => {
+            stop_capture(shared);
             ok_message(&id, current_rev())
         }
         other => error_message(

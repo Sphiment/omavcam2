@@ -13,6 +13,7 @@
 //! ```text
 //! {"v":1,"id":"7","kind":"status"}
 //! {"v":1,"id":"8","kind":"select","serial":"39281FDJH0031T"}
+//! {"v":1,"id":"9","kind":"start"}
 //! ```
 //!
 //! The daemon pushes the *whole* state, unprompted, to every connected client
@@ -38,9 +39,21 @@ pub struct State {
     /// Whether `adb start-server` last succeeded.
     pub adb_ok: bool,
     pub connection: Connection,
-    // ponytail: `capture` lands in #5. It is on the wire as null now so the
-    // shape a client parses does not change under it.
-    pub capture: Option<Value>,
+    /// The running capture, or nothing. There is no third state: a capture
+    /// that has stopped, however it stopped, is a capture that is not there.
+    pub capture: Option<Capture>,
+}
+
+/// One running stream from a phone into the virtual camera. Everything about
+/// it is fixed at launch — changing any of it means replacing the capture.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Capture {
+    pub phone: Phone,
+    /// The virtual camera being written, found by its `card_label`.
+    pub node: String,
+    /// The frame size, fixed for this capture's lifetime: a restart at another
+    /// size freezes whatever is watching (ADR-0010).
+    pub size: String,
 }
 
 /// One Android device, identified by the serial adb reports, under a name a

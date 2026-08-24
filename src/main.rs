@@ -1,3 +1,4 @@
+mod capture;
 mod daemon;
 mod phones;
 mod protocol;
@@ -27,7 +28,7 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
-        (Some(kind @ ("status" | "refresh")), _) => request(kind, json!({})),
+        (Some(kind @ ("status" | "refresh" | "start" | "stop")), _) => request(kind, json!({})),
         // A bare `select` goes to the daemon too: its error is what lists the
         // phones that are attached.
         (Some("select"), serial) => {
@@ -37,7 +38,7 @@ fn main() -> ExitCode {
             if let Some(other) = other {
                 eprintln!("omavcam: unknown command: {other}");
             }
-            eprintln!("usage: omavcam [status|refresh|select <serial>|daemon]");
+            eprintln!("usage: omavcam [status|refresh|select <serial>|start|stop|daemon]");
             ExitCode::from(2)
         }
     }
@@ -98,7 +99,7 @@ fn render(state: &State) -> String {
         if state.adb_ok { "ok" } else { "unavailable" },
         match &state.capture {
             None => "none".to_string(),
-            Some(c) => c.to_string(),
+            Some(c) => format!("{} from {} to {}", c.size, phone(&c.phone), c.node),
         },
     )
 }

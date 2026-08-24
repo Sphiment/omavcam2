@@ -1,14 +1,23 @@
 #!/bin/sh
-# One stub for adb, scrcpy and modprobe: copied under each of those names by
-# the test harness, ahead of the real ones on PATH. It records the argv it was
-# called with and prints whatever the test scripted for it.
+# One stub for adb, scrcpy, v4l2-ctl and modprobe: copied under each of those
+# names by the test harness, ahead of the real ones on PATH. It records the argv
+# it was called with and prints whatever the test scripted for it.
 #
 #   $OMAVCAM_STUB_LOG    appended one line per call: "<tool> <args...>"
 #   $OMAVCAM_STUB_DIR    <tool>.out  printed on stdout, if present
 #                        <tool>.code exit status, if present
+#                        <tool>.hold stay running while this file exists;
+#                        "released <tool>" is logged once it goes
 tool=${0##*/}
 printf '%s\n' "$tool $*" >>"$OMAVCAM_STUB_LOG"
 [ -f "$OMAVCAM_STUB_DIR/$tool.out" ] && cat "$OMAVCAM_STUB_DIR/$tool.out"
+# A held stub is a process that keeps running — a capture that is still going.
+# Removing the hold is that process dying without being asked to, and the log
+# line is how a test knows it has actually gone.
+if [ -f "$OMAVCAM_STUB_DIR/$tool.hold" ]; then
+  while [ -f "$OMAVCAM_STUB_DIR/$tool.hold" ]; do sleep 0.05; done
+  printf 'released %s\n' "$tool" >>"$OMAVCAM_STUB_LOG"
+fi
 if [ -f "$OMAVCAM_STUB_DIR/$tool.code" ]; then
   exit "$(cat "$OMAVCAM_STUB_DIR/$tool.code")"
 fi

@@ -12,16 +12,31 @@ them. See [CONTEXT.md](CONTEXT.md) for the vocabulary and
 ## Status
 
 Early. What exists today is the daemon, the socket protocol, the test harness
-everything else is built on, and wired connection: plug a phone in over USB and
-`omavcam status` names it.
+everything else is built on, wired connection — plug a phone in over USB and
+`omavcam status` names it — and a capture that can be started and stopped:
+`omavcam start` and the phone's camera appears in Meet's camera list.
 
-There is no capture yet, and no wireless — those are the next tickets.
+There is no wireless, no preview, and no settings — the capture runs at its
+defaults. Those are the next tickets.
 
 ## Requirements
 
 - Rust (`pacman -S rustup && rustup default stable`)
 - systemd (user session)
-- `android-tools` for `adb` — not needed to build or test, only to run
+- `android-tools` for `adb`, `scrcpy` for the capture, and `v4l-utils` for
+  `v4l2-ctl` — none of them needed to build or test, only to run
+- `v4l2loopback-dkms`, loaded and labelled `omavcam` at boot. That is the
+  package's job, not the daemon's: a `systemd --user` service has no capability
+  to load a module (ADR-0008). Until [#16](../../issues/16) packages it:
+
+  ```sh
+  echo v4l2loopback | sudo tee /etc/modules-load.d/omavcam.conf
+  echo 'options v4l2loopback video_nr=42 card_label=omavcam exclusive_caps=1' \
+    | sudo tee /etc/modprobe.d/omavcam.conf
+  ```
+
+  `exclusive_caps=1` is what keeps an idle omavcam out of every application's
+  camera list, and what makes the node readable at all (ADR-0012).
 
 ## Build
 
@@ -58,6 +73,8 @@ Omarchy `service` plugin, and those are QML singletons that die with the shell
 ```sh
 omavcam status            # print the daemon's state
 omavcam select <serial>   # choose which attached phone to use (bare: lists them)
+omavcam start             # start the capture: the phone's camera becomes a webcam
+omavcam stop              # end it; omavcam disappears from camera lists again
 omavcam refresh           # re-check adb and the attached phones now
 omavcam daemon            # run the daemon in the foreground (systemd's job, normally)
 ```
@@ -94,6 +111,23 @@ Logs go to the journal:
 journalctl --user -u omavcam.service -f
 ```
 
+## The capture
+
+`omavcam start` launches one `scrcpy` against the selected phone, writing its
+camera straight to the virtual camera at 1280x720. `omavcam stop` ends it, and
+omavcam then disappears from every application's camera list — that is the
+point of `exclusive_caps=1`, not a side effect: an idle omavcam showing black
+in Meet's dropdown is what it avoids. The corollary is that omavcam is absent
+from the list until a capture is running, so it is picked after starting.
+
+scrcpy dying on its own — the phone unplugged, the process killed — moves the
+state to stopped, so the switch never claims to be on while nothing is feeding.
+An application already watching survives that: frames stop, it keeps showing its
+last one, and a restart at the **same** frame size resumes. A restart at a
+different size would freeze it permanently and silently, which is why the size
+is fixed for a capture's lifetime and why there is no resolution setting yet
+(ADR-0010).
+
 ## How the pieces talk
 
 Line-delimited JSON over a unix socket in the runtime dir. The daemon pushes the
@@ -116,11 +150,15 @@ cargo test
 ```
 
 Tests spawn the **real** daemon against a temp state dir, with a directory of
-stub `adb`, `scrcpy` and `modprobe` executables ahead of the real ones on
-`PATH`. Each stub records the argv it was called with and prints whatever the
-test scripted for it. The stub directory *is* the fake — there is no
-process-runner abstraction inside the daemon to swap out, so the tests exercise
-the same code that runs in production.
+stub `adb`, `scrcpy`, `v4l2-ctl` and `modprobe` executables ahead of the real
+ones on `PATH`, and a fake `/sys/class/video4linux` to find the virtual camera
+in. Each stub records the argv it was called with, prints whatever the test
+scripted for it, and stays running while the test holds it — which is how a
+capture that is still going, or one that dies on its own, is expressed.
+
+The stub directory *is* the fake — there is no process-runner abstraction inside
+the daemon to swap out, so the tests exercise the same code that runs in
+production.
 
 That harness is in [`tests/common/mod.rs`](tests/common/mod.rs) and the stub
 itself is [`tests/stub`](tests/stub). One test drives real socket activation
@@ -133,10 +171,11 @@ installing anything.
 src/protocol.rs   the wire format, shared by the daemon and the CLI
 src/daemon.rs     the daemon: state, clients, pushing
 src/phones.rs     what adb sees, which phone is selected, what that means
+src/capture.rs    finding the virtual camera, and launching scrcpy at it
 src/main.rs       the CLI, and the entry point for both
 systemd/          the socket and service units
 tests/common/     the harness every test file is built on
-tests/            the tests, and the stub adb/scrcpy/modprobe
+tests/            the tests, and the stub adb/scrcpy/v4l2-ctl/modprobe
 CONTEXT.md        the vocabulary; use these words, avoid the listed synonyms
 docs/adr/         why things are the way they are
 docs/agents/      how agents should work in this repo

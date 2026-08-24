@@ -1,5 +1,6 @@
-//! The harness the rest of the project's tests are built on: a real daemon,
-//! a temp state dir, and a directory of stub `adb`, `scrcpy` and `modprobe`
+//! The harness the rest of the project's tests are built on: a real daemon, a
+//! temp state dir, a fake `/sys/class/video4linux` to look the virtual camera
+//! up in, and a directory of stub `adb`, `scrcpy`, `v4l2-ctl` and `modprobe`
 //! executables ahead of the real ones on PATH. The stub directory *is* the
 //! fake — there is no process-runner trait to inject.
 
@@ -21,6 +22,7 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Fixture {
     dir: PathBuf,
+    poll_ms: String,
     socket: PathBuf,
     log: PathBuf,
     stub_dir: PathBuf,
@@ -33,6 +35,16 @@ impl Fixture {
     /// something has connected. Most tests want this.
     pub fn start() -> Fixture {
         let mut fixture = Fixture::new();
+        fixture.spawn();
+        fixture
+    }
+
+    /// A daemon that polls adb once and then effectively never again, so
+    /// nothing is noticed behind the test's back and a request has to find out
+    /// for itself.
+    pub fn slow_poll() -> Fixture {
+        let mut fixture = Fixture::new();
+        fixture.poll_ms = "3600000".to_string();
         fixture.spawn();
         fixture
     }
@@ -56,7 +68,11 @@ impl Fixture {
                     ),
                     format!("--setenv=OMAVCAM_STUB_LOG={}", fixture.log.display()),
                     format!("--setenv=OMAVCAM_STUB_DIR={}", fixture.stub_dir.display()),
-                    "--setenv=OMAVCAM_POLL_MS=25".to_string(),
+                    format!(
+                        "--setenv=OMAVCAM_V4L2_DIR={}",
+                        fixture.dir.join("sys").display()
+                    ),
+                    format!("--setenv=OMAVCAM_POLL_MS={}", fixture.poll_ms),
                 ])
                 .args([env!("CARGO_BIN_EXE_omavcam"), "daemon"])
                 .spawn()
@@ -84,11 +100,12 @@ impl Fixture {
         fs::create_dir_all(dir.join("state")).unwrap();
 
         let stub = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/stub");
-        for tool in ["adb", "scrcpy", "modprobe"] {
+        for tool in ["adb", "scrcpy", "v4l2-ctl", "modprobe"] {
             fs::copy(&stub, bin_dir.join(tool)).unwrap();
         }
 
         let fixture = Fixture {
+            poll_ms: "25".to_string(),
             socket: dir.join("omavcam.sock"),
             log: dir.join("argv.log"),
             stub_dir,
@@ -97,6 +114,7 @@ impl Fixture {
             dir,
         };
         fs::write(&fixture.log, "").unwrap();
+        fixture.script_virtual_camera(Some("video42"));
         fixture
     }
 
@@ -127,9 +145,10 @@ impl Fixture {
             .env("OMAVCAM_STATE_DIR", self.dir.join("state"))
             .env("OMAVCAM_STUB_LOG", &self.log)
             .env("OMAVCAM_STUB_DIR", &self.stub_dir)
+            .env("OMAVCAM_V4L2_DIR", self.dir.join("sys"))
             // The daemon polls adb for attached phones; tests should not wait a
             // real second for a plug or an unplug to be noticed.
-            .env("OMAVCAM_POLL_MS", "25")
+            .env("OMAVCAM_POLL_MS", &self.poll_ms)
             .process_group(0)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -188,6 +207,56 @@ impl Fixture {
             .lines()
             .map(str::to_string)
             .collect()
+    }
+
+    /// Keeps the stub running once it is launched, the way scrcpy keeps
+    /// running for the life of a capture.
+    pub fn script_hold(&self, tool: &str) {
+        fs::write(self.stub_dir.join(format!("{tool}.hold")), "").unwrap();
+    }
+
+    /// Lets a held stub exit on its own, which is what scrcpy dying without
+    /// being asked to looks like from here.
+    pub fn script_release(&self, tool: &str) {
+        fs::remove_file(self.stub_dir.join(format!("{tool}.hold"))).unwrap();
+    }
+
+    /// The fake `/sys/class/video4linux` the daemon looks the virtual camera up
+    /// in: a directory per node, each holding its `card_label` in `name`. The
+    /// laptop's own webcam is always there, so a lookup that ignores the label
+    /// finds the wrong node. `None` is the module not loaded at all.
+    pub fn script_virtual_camera(&self, node: Option<&str>) {
+        let sys = self.dir.join("sys");
+        let _ = fs::remove_dir_all(&sys);
+        fs::create_dir_all(sys.join("video0")).unwrap();
+        fs::write(sys.join("video0/name"), "HP Wide Vision HD Camera\n").unwrap();
+        if let Some(node) = node {
+            fs::create_dir_all(sys.join(node)).unwrap();
+            fs::write(sys.join(node).join("name"), "omavcam\n").unwrap();
+        }
+    }
+
+    /// The calls to one tool, once there are at least `n` of them. A stub
+    /// records itself as it starts, which is a moment after the daemon spawned
+    /// it and told everyone.
+    pub fn await_argv(&self, tool: &str, n: usize) -> Vec<String> {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let calls: Vec<String> = self
+                .argv()
+                .into_iter()
+                .filter(|line| line.starts_with(&format!("{tool} ")))
+                .collect();
+            if calls.len() >= n {
+                return calls;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {n} {tool} calls; the log holds {:?}",
+                self.argv()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     pub fn script_exit(&self, tool: &str, code: i32) {

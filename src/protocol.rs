@@ -3,17 +3,19 @@
 //! Two message types travel from the daemon to a client:
 //!
 //! ```text
-//! {"type":"state","v":2,"rev":4,"state":{...}}
-//! {"type":"response","v":2,"id":"7","rev":4,"ok":true}
-//! {"type":"response","v":2,"id":"7","rev":4,"ok":false,"error":{"code":"...","message":"..."}}
+//! {"type":"state","v":4,"rev":4,"state":{...}}
+//! {"type":"response","v":4,"id":"7","rev":4,"ok":true}
+//! {"type":"response","v":4,"id":"7","rev":4,"ok":false,"error":{"code":"...","message":"..."}}
 //! ```
 //!
 //! and one from a client to the daemon:
 //!
 //! ```text
-//! {"v":2,"id":"7","kind":"status"}
-//! {"v":2,"id":"8","kind":"select","serial":"39281FDJH0031T"}
-//! {"v":2,"id":"9","kind":"start"}
+//! {"v":4,"id":"7","kind":"status"}
+//! {"v":4,"id":"8","kind":"select","serial":"39281FDJH0031T"}
+//! {"v":4,"id":"9","kind":"start"}
+//! {"v":4,"id":"10","kind":"set","setting":"zoom","value":2}
+//! {"v":4,"id":"11","kind":"apply"}
 //! ```
 //!
 //! The daemon pushes the *whole* state, unprompted, to every connected client
@@ -24,9 +26,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::settings::SettingsState;
+
 /// Bumped whenever the shape below changes incompatibly. A client sending
 /// anything else is rejected with an error rather than misparsed.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 4;
 
 /// Longest accepted request line, newline included. A client cannot make the
 /// daemon allocate past this.
@@ -39,8 +43,8 @@ pub struct State {
     /// Whether the latest adb server probe or device scan succeeded.
     pub adb_ok: bool,
     pub connection: Connection,
-    /// The running capture, or nothing. There is no third state: a capture
-    /// that has stopped, however it stopped, is a capture that is not there.
+    /// The requested capture, retained while its writer reconnects. The
+    /// connection phase says whether it is currently feeding frames.
     pub capture: Option<Capture>,
     /// Every phone adb can see, whatever phase the connection is in. A fact
     /// about the world rather than a property of one connection state, which
@@ -48,6 +52,32 @@ pub struct State {
     /// asking for one.
     #[serde(default)]
     pub attached: Vec<Attached>,
+    /// Camera capabilities and the selected phone's applied and pending
+    /// settings. Absent until a connected phone has answered scrcpy's probe.
+    #[serde(default)]
+    pub settings: Option<SettingsState>,
+    /// Every phone remembered in the one wired/wireless registry.
+    #[serde(default)]
+    pub known: Vec<KnownPhone>,
+    /// The compositor values actually applied to the preview. Clients compare
+    /// their live theme with these rather than assuming a one-shot sync held.
+    #[serde(default)]
+    pub preview_style: PreviewStyle,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreviewStyle {
+    pub rounding: u64,
+    pub border_size: u64,
+}
+
+impl Default for PreviewStyle {
+    fn default() -> Self {
+        Self {
+            rounding: 0,
+            border_size: 1,
+        }
+    }
 }
 
 /// One phone adb reports, and whether adb will talk to it.
@@ -60,7 +90,7 @@ pub struct Attached {
     pub authorised: bool,
 }
 
-/// One running stream from a phone into the virtual camera. Everything about
+/// One requested stream from a phone into the virtual camera. Everything about
 /// it is fixed at launch — changing any of it means replacing the capture.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Capture {
@@ -70,9 +100,14 @@ pub struct Capture {
     /// The frame size, fixed for this capture's lifetime: a restart at another
     /// size freezes whatever is watching (ADR-0010).
     pub size: String,
-    /// Whether this capture asked the phone to stay awake while plugged in,
-    /// which also says whether stopping has a setting to put back.
+    /// Kept in protocol v2 for clients that already read it. Preview captures
+    /// require `--no-control`, so new captures always report false: scrcpy
+    /// refuses `--stay-awake` with that flag.
     pub stay_awake: bool,
+    /// Whether scrcpy's own window is on-screen. Hiding moves that same
+    /// window; it never replaces the capture.
+    #[serde(default)]
+    pub preview: bool,
 }
 
 /// One Android device, identified by the serial adb reports, under a name a
@@ -83,12 +118,44 @@ pub struct Phone {
     pub name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Transport {
+    Wired,
+    Wireless,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnownPhone {
+    /// Durable identity for clients and per-phone settings. A provisional
+    /// wireless entry keeps its first endpoint here; later port changes only
+    /// update `phone.serial` and `connect_address`.
+    #[serde(default)]
+    pub id: String,
+    /// The stable identity reported by the phone, once a targeted query has
+    /// succeeded. It reconciles wired and wireless records without changing
+    /// the durable ID clients already saw.
+    #[serde(default)]
+    pub hardware_id: Option<String>,
+    pub phone: Phone,
+    pub transport: Transport,
+    /// Wireless debugging's connect endpoint. Pairing uses a separate,
+    /// transient endpoint and is deliberately never persisted here.
+    pub connect_address: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairingFailure {
+    WrongCode,
+    WrongAddress,
+    Unreachable,
+}
+
 /// How far the connection to a phone has got. A phase with its own states and
 /// its own advice, not a precondition that holds or doesn't (ADR-0007).
 ///
-/// The wireless states — `NeedsPairing`, `PairingFailed`, `Unreachable` — and
-/// `Reconnecting` join this enum in later tickets. On the wire each variant is
-/// `{"state":"connected","phone":{...}}`.
+/// On the wire each variant is `{"state":"connected","phone":{...}}`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Connection {
@@ -112,6 +179,19 @@ pub enum Connection {
     },
     Connected {
         phone: Phone,
+    },
+    /// A logical capture still owns the virtual camera while its selected
+    /// phone or writer is being recovered.
+    Reconnecting {
+        phone: Phone,
+    },
+    NeedsPairing,
+    PairingFailed {
+        reason: PairingFailure,
+    },
+    Unreachable {
+        phone: Phone,
+        connect_address: String,
     },
 }
 

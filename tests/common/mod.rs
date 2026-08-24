@@ -9,6 +9,7 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -19,7 +20,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
-const PROTOCOL_VERSION: u32 = 2;
+const PROTOCOL_VERSION: u32 = 4;
 
 pub struct Fixture {
     dir: PathBuf,
@@ -86,7 +87,12 @@ impl Fixture {
                         "--setenv=OMAVCAM_V4L2_DIR={}",
                         self.dir.join("sys").display()
                     ),
+                    format!(
+                        "--setenv=OMAVCAM_PROC_DIR={}",
+                        self.dir.join("proc").display()
+                    ),
                     "--setenv=OMAVCAM_STARTUP_MS=500".to_string(),
+                    "--setenv=OMAVCAM_PREVIEW_MS=500".to_string(),
                     "--setenv=OMAVCAM_COMMAND_MS=100".to_string(),
                     format!("--setenv=OMAVCAM_POLL_MS={}", self.poll_ms),
                 ])
@@ -113,9 +119,10 @@ impl Fixture {
         fs::create_dir_all(&stub_dir).unwrap();
         fs::create_dir_all(&bin_dir).unwrap();
         fs::create_dir_all(dir.join("state")).unwrap();
+        fs::create_dir_all(dir.join("proc")).unwrap();
 
         let stub = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/stub");
-        for tool in ["adb", "scrcpy", "v4l2-ctl", "modprobe"] {
+        for tool in ["adb", "scrcpy", "v4l2-ctl", "modprobe", "hyprctl"] {
             fs::copy(&stub, bin_dir.join(tool)).unwrap();
         }
 
@@ -130,6 +137,18 @@ impl Fixture {
         };
         fs::write(&fixture.log, "").unwrap();
         fixture.script_virtual_camera(Some("video42"));
+        fixture.script_camera_capabilities(
+            "    --camera-id=0    (back, 4080x3060, fps={15, 20, 24, 30}, zoom-range=[1, 8])\n\
+                 - 1920x1080\n\
+                 - 1280x720\n\
+                 - 640x480\n\
+             --camera-id=1    (front, 3264x2448, fps={15, 24, 30}, zoom-range=[1, 4])\n\
+                 - 1920x1080\n\
+                 - 1280x720\n\
+             - 640x480\n",
+        );
+        fixture.script_preview_window([120, 80]);
+        fixture.script_monitors(&[[0, 0, 1920, 1080]]);
         fixture
     }
 
@@ -161,7 +180,9 @@ impl Fixture {
             .env("OMAVCAM_STUB_LOG", &self.log)
             .env("OMAVCAM_STUB_DIR", &self.stub_dir)
             .env("OMAVCAM_V4L2_DIR", self.dir.join("sys"))
+            .env("OMAVCAM_PROC_DIR", self.dir.join("proc"))
             .env("OMAVCAM_STARTUP_MS", "500")
+            .env("OMAVCAM_PREVIEW_MS", "500")
             .env("OMAVCAM_COMMAND_MS", "100")
             // The daemon polls adb for attached phones; tests should not wait a
             // real second for a plug or an unplug to be noticed.
@@ -205,6 +226,7 @@ impl Fixture {
             stream,
             next_id: 0,
             last_state: Value::Null,
+            states: Vec::new(),
         }
     }
 
@@ -292,10 +314,65 @@ impl Fixture {
         .unwrap();
     }
 
+    pub fn script_fail_once(&self, tool: &str, argument: &str, code: i32) {
+        fs::write(
+            self.stub_dir.join(format!("{tool}.fail_once")),
+            format!("{code}\n{argument}"),
+        )
+        .unwrap();
+    }
+
+    pub fn script_camera_capabilities(&self, output: &str) {
+        fs::write(self.stub_dir.join("scrcpy.list.out"), output).unwrap();
+    }
+
+    pub fn script_consumer(&self, attached: bool) {
+        let process = self.dir.join("proc/999");
+        let _ = fs::remove_dir_all(&process);
+        if attached {
+            let fd = process.join("fd");
+            fs::create_dir_all(&fd).unwrap();
+            std::os::unix::fs::symlink("/dev/video42", fd.join("3")).unwrap();
+        }
+    }
+
+    pub fn script_uncertain_consumer(&self, uncertain: bool) {
+        let process = self.dir.join("proc/998");
+        let fd = process.join("fd");
+        if fd.exists() {
+            fs::set_permissions(&fd, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let _ = fs::remove_dir_all(&process);
+        if uncertain {
+            fs::create_dir_all(&fd).unwrap();
+            fs::set_permissions(fd, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+    }
+
+    pub fn script_output_for(&self, tool: &str, command: &str, output: &str) {
+        fs::write(self.stub_dir.join(format!("{tool}.{command}.out")), output).unwrap();
+    }
+
     /// What `adb devices -l` prints from now on: one `(serial, adb's word for
     /// its state, model)` per attached phone. An unauthorised phone reports no
     /// model, which is why the model is optional here.
     pub fn script_devices(&self, attached: &[(&str, &str, Option<&str>)]) {
+        fs::write(
+            self.stub_dir.join("adb.out"),
+            Self::devices_output(attached),
+        )
+        .unwrap();
+    }
+
+    pub fn script_devices_on_connect(&self, attached: &[(&str, &str, Option<&str>)]) {
+        fs::write(
+            self.stub_dir.join("adb.connect.devices"),
+            Self::devices_output(attached),
+        )
+        .unwrap();
+    }
+
+    fn devices_output(attached: &[(&str, &str, Option<&str>)]) -> String {
         let mut out = String::from("List of devices attached\n");
         for (serial, status, model) in attached {
             out.push_str(&format!("{serial}\t{status} usb:1-4"));
@@ -304,7 +381,38 @@ impl Fixture {
             }
             out.push_str(" transport_id:1\n");
         }
-        fs::write(self.stub_dir.join("adb.out"), out).unwrap();
+        out
+    }
+
+    pub fn script_preview_window(&self, at: [i64; 2]) {
+        fs::write(
+            self.stub_dir.join("hyprctl.clients.out"),
+            json!([{
+                "title": "omavcam preview",
+                "at": at,
+                "size": [640, 360],
+                "floating": true,
+                "pinned": true,
+            }])
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    pub fn script_preview_absent(&self) {
+        fs::write(self.stub_dir.join("hyprctl.clients.out"), "[]").unwrap();
+    }
+
+    pub fn script_monitors(&self, monitors: &[[i64; 4]]) {
+        let monitors: Vec<Value> = monitors
+            .iter()
+            .map(|[x, y, width, height]| json!({"x": x, "y": y, "width": width, "height": height}))
+            .collect();
+        fs::write(
+            self.stub_dir.join("hyprctl.monitors.out"),
+            json!(monitors).to_string(),
+        )
+        .unwrap();
     }
 }
 
@@ -322,6 +430,8 @@ pub struct Client {
     /// The most recent pushed state, so a test that reads past one can still
     /// see it. The daemon publishes before it responds.
     pub last_state: Value,
+    /// Every whole state this client observed, including transient ones.
+    pub states: Vec<Value>,
 }
 
 impl Client {
@@ -332,6 +442,7 @@ impl Client {
         let msg: Value = serde_json::from_str(&line).unwrap();
         if msg["type"] == json!("state") {
             self.last_state = msg.clone();
+            self.states.push(msg["state"].clone());
         }
         msg
     }

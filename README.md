@@ -12,13 +12,13 @@ them. See [CONTEXT.md](CONTEXT.md) for the vocabulary and
 ## Status
 
 Early. What exists today is the daemon, the socket protocol, the test harness
-everything else is built on, wired connection — plug a phone in over USB and
-`omavcam status` names it — and a capture that can be started and stopped:
-`omavcam start` and the phone's camera appears in Meet's camera list. There is
-also a bar widget, so none of that needs a terminal.
+everything else is built on, wired and wireless connection, and a capture that
+can be started and stopped: `omavcam start` makes the phone's camera appear in
+Meet's camera list. Lens, resolution, frame rate, aspect ratio and zoom can be
+staged and applied from the CLI. There is also a bar widget, so starting and
+stopping needs no terminal.
 
-There is no wireless, no preview, and no settings — the capture runs at its
-defaults. Those are the next tickets.
+There is no Studio yet. That is the next ticket.
 
 ## Requirements
 
@@ -49,14 +49,27 @@ The binary lands at `target/release/omavcam`.
 
 ## Install
 
-Nothing packages this yet — that is [#16](../../issues/16). Until then, by hand:
+**The default Omarchy plugin install is not enough on its own.** Most Omarchy
+plugins are pure QML and `omarchy plugin add` is their whole installation; this
+one's widget is a thin client for a Rust daemon, so the daemon has to be built
+and installed too or the widget has nothing to talk to. Nothing packages this
+yet — that is [#16](../../issues/16). Until then, by hand:
 
 ```sh
+# 1. Clone and build the daemon (needs Rust, see Requirements)
+git clone https://github.com/Sphiment/omavcam2.git
+cd omavcam2
+cargo build --release
+
+# 2. Install the daemon and its systemd user units
 sudo install -Dm755 target/release/omavcam /usr/bin/omavcam
 install -Dm644 systemd/omavcam.socket ~/.config/systemd/user/omavcam.socket
 install -Dm644 systemd/omavcam.service ~/.config/systemd/user/omavcam.service
 systemctl --user daemon-reload
 systemctl --user enable --now omavcam.socket
+
+# 3. Add the bar widget — this is the only step the default plugin install covers
+omarchy plugin add https://github.com/Sphiment/omavcam2.git --enable
 ```
 
 The binary has to be at `/usr/bin/omavcam` because that is the path
@@ -73,9 +86,22 @@ Omarchy `service` plugin, and those are QML singletons that die with the shell
 
 ```sh
 omavcam status            # print the daemon's state
+omavcam phones            # list remembered wired and wireless phones
 omavcam select <serial>   # choose which attached phone to use (bare: lists them)
+omavcam pair              # show Android's wireless-pairing steps
+omavcam pair <pair-address> <code> <connect-address>
+omavcam connect <serial> <new-connect-address>  # update a changed connect port
+omavcam forget <serial>   # remove a remembered phone
 omavcam start             # start the capture: the phone's camera becomes a webcam
 omavcam stop              # end it; omavcam disappears from camera lists again
+omavcam set lens 1        # stage one or several camera settings
+omavcam set resolution 1920x1080
+omavcam set frame-rate 24
+omavcam set aspect-ratio 16:9
+omavcam set zoom 2.5
+omavcam set crop 0.1:0.1:0.8:0.8  # normalized x:y:width:height; "none" clears it
+omavcam apply             # replace a capture once, or just persist if stopped
+omavcam discard           # drop every staged change
 omavcam refresh           # re-check adb and the attached phones now
 omavcam daemon            # run the daemon in the foreground (systemd's job, normally)
 ```
@@ -110,6 +136,31 @@ correct right up until a second phone is plugged in.
 
 See [ADR-0007](docs/adr/0007-connection-is-a-phase-not-a-precondition.md).
 
+## Wireless pairing
+
+Run `omavcam pair` for the steps. On the phone, open Developer options →
+Wireless debugging, then open **Pair device with pairing code**. That dialog's
+address and six-digit code are for pairing. The address on the main Wireless
+debugging screen is for connecting. The ports are different; omavcam asks for
+both so it cannot silently use one for the other:
+
+```sh
+omavcam pair 192.168.1.40:37123 123456 192.168.1.40:42877
+```
+
+Pairing is one-time. Later daemon starts use only `adb connect`; no cable and
+no `adb tcpip 5555` are involved. If Android changes the connect port after a
+reboot or Wireless debugging toggle, copy the new main-screen address and run:
+
+```sh
+omavcam connect <old-connect-address> <new-connect-address>
+```
+
+Do not pair again. An unreachable paired phone reports that state separately
+and names being on different networks, a sleeping phone, and a changed connect
+port as the things to check. `omavcam phones` lists remembered phones by model;
+`omavcam forget <serial>` removes one.
+
 Logs go to the journal:
 
 ```sh
@@ -119,7 +170,10 @@ journalctl --user -u omavcam.service -f
 ## The capture
 
 `omavcam start` launches one `scrcpy` against the selected phone, writing its
-camera straight to the virtual camera at 1280x720. `omavcam stop` ends it, and
+camera straight to the virtual camera with that phone's applied settings.
+Capabilities come from `scrcpy --list-camera-sizes`, so each lens exposes its
+own resolutions, frame rates and zoom bounds rather than a hardcoded menu.
+Settings are remembered per phone. `omavcam stop` ends the capture, and
 omavcam then disappears from every application's camera list — that is the
 point of `exclusive_caps=1`, not a side effect: an idle omavcam showing black
 in Meet's dropdown is what it avoids. The corollary is that omavcam is absent
@@ -132,27 +186,45 @@ open cameras is system-wide, so unlocking that way while a capture is running
 takes the camera out from under it — unlock with a PIN instead, or start the
 capture afterwards.
 
-scrcpy dying on its own — the phone unplugged, the process killed — moves the
-state to stopped, so the switch never claims to be on while nothing is feeding.
-An application already watching survives that: frames stop, it keeps showing its
-last one, and a restart at the **same** frame size resumes. A restart at a
-different size would freeze it permanently and silently, which is why the size
-is fixed for a capture's lifetime and why there is no resolution setting yet
-(ADR-0010).
+If scrcpy dies, the logical capture moves to `Reconnecting` and keeps the same
+phone and applied settings. An application already watching survives that:
+frames stop, it keeps showing its last one, and the daemon resumes at the
+**same** frame size when the phone answers again. A different size would freeze
+the consumer permanently and silently, so Apply refuses resolution or
+phone-side crop changes while another application has the virtual camera open.
+Same-size changes restart safely. If the new capture fails, Apply relaunches
+the previous settings and reports what was rejected (ADR-0010).
 
 The daemon leaves `keep_format=0`: an application already reading the camera
 pins the format by itself, while an idle node must remain free to accept the
-size changes ticket #9 allows. `sustain_framerate` and `timeout` keep consumers
-that dislike stalled input attached across a same-size restart.
+size changes ticket #9 allows. `sustain_framerate` repeats the last real frame
+while the writer reconnects; `timeout` stays off because its default is black.
+
+The same scrcpy process also draws the floating preview. It is launched with a
+known title and `--no-control`, so clicks and typing are never forwarded to the
+phone. The panel hides it by moving that window off-screen and restores its last
+position; scrcpy and the virtual camera keep running throughout. Hyprland rules
+make it floating, pinned on every workspace, aspect-ratio preserving,
+unfocusable, and resistant to the compositor's close shortcut. They also apply
+the active Omarchy corner radius and border width.
+
+`omavcam start --stay-awake` is refused while the floating preview is part of
+the capture. scrcpy itself forbids `--stay-awake` together with the mandatory
+`--no-control`; omavcam does not weaken input safety or take ownership of
+restoring the phone's power setting.
 
 ## The bar widget
 
-An Omarchy plugin lives at the root of this repo, so it installs the ordinary
-way and there is nothing to build:
+An Omarchy plugin lives at the root of this repo, so the widget itself installs
+the ordinary way:
 
 ```sh
 omarchy plugin add https://github.com/Sphiment/omavcam2.git --enable
 ```
+
+The widget is only a client, though: the daemon must be built and installed
+first, or the bar shows a widget with nothing behind it — see
+[Install](#install).
 
 The icon says which of three things is true at a glance: a capture is running,
 nothing is capturing, or something is wrong that only the person at the desk
@@ -160,7 +232,7 @@ can fix — adb missing, the daemon unreachable, a phone that has not accepted
 the debugging prompt. Finding that out before the call is the entire point.
 
 Clicking it opens the **panel**: a status light, the connection in words, and
-the switch that starts and stops the capture. Whenever more than one phone is
+switches for the capture and its preview. Whenever more than one phone is
 attached the panel offers them and picking one takes effect — whatever phase
 the connection is in, because the second phone appearing on the desk is the
 moment someone wants to switch. The phone in use is marked, one that has not

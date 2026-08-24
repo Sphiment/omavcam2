@@ -4,6 +4,7 @@
 //! never guesses: the second phone on the desk is usually charging, not waiting
 //! to be a webcam.
 
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -13,7 +14,8 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 
 use crate::command;
-use crate::protocol::{Connection, Phone};
+use crate::protocol::{Connection, KnownPhone, PairingFailure, Phone};
+use crate::settings::CameraSettings;
 
 /// One line of `adb devices -l`: the serial, adb's own word for its state, and
 /// the model if adb knows it — an unauthorised phone reports none.
@@ -56,6 +58,84 @@ pub fn connect(serial: &str) -> bool {
         command::status(process),
         Ok(status) if status.success()
     )
+}
+
+pub fn valid_endpoint(endpoint: &str) -> bool {
+    endpoint.rsplit_once(':').is_some_and(|(host, port)| {
+        !host.is_empty()
+            && !host.chars().any(char::is_whitespace)
+            && port.parse::<u16>().is_ok_and(|port| port != 0)
+    })
+}
+
+pub fn pair(address: &str, code: &str) -> Result<(), PairingFailure> {
+    if !valid_endpoint(address) {
+        return Err(PairingFailure::WrongAddress);
+    }
+    if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(PairingFailure::WrongCode);
+    }
+    let mut process = Command::new("adb");
+    process.args(["pair", address, code]);
+    let output = command::output(process).map_err(|_| PairingFailure::Unreachable)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let words = format!(
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .to_lowercase();
+    if words.contains("wrong password") || words.contains("pairing code") {
+        Err(PairingFailure::WrongCode)
+    } else if [
+        "unknown host",
+        "bad port",
+        "invalid address",
+        "name or service",
+    ]
+    .iter()
+    .any(|needle| words.contains(needle))
+    {
+        Err(PairingFailure::WrongAddress)
+    } else {
+        Err(PairingFailure::Unreachable)
+    }
+}
+
+pub fn connect_wireless(address: &str) -> bool {
+    if !valid_endpoint(address) {
+        return false;
+    }
+    let mut process = Command::new("adb");
+    process.args(["connect", address]);
+    command::output(process).is_ok_and(|output| {
+        let words = format!(
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .to_lowercase();
+        output.status.success()
+            && !["failed", "unable", "cannot"]
+                .iter()
+                .any(|needle| words.contains(needle))
+    })
+}
+
+pub fn disconnect_wireless(address: &str) -> bool {
+    let mut process = Command::new("adb");
+    process.args(["disconnect", address]);
+    matches!(command::status(process), Ok(status) if status.success())
+}
+
+pub fn stable_id(serial: &str) -> Option<String> {
+    let mut process = Command::new("adb");
+    process.args(["-s", serial, "shell", "getprop", "ro.serialno"]);
+    let output = command::output(process).ok()?;
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (output.status.success() && !id.is_empty()).then_some(id)
 }
 
 fn parse(output: &str) -> Vec<Attached> {
@@ -147,12 +227,32 @@ impl From<&Attached> for crate::protocol::Attached {
     }
 }
 
-/// What omavcam remembers about phones between runs: today the selected one,
-/// later the phones wireless pairing knows about. One registry, not two.
+/// What omavcam remembers about phones between runs: the selected one and the
+/// phones wireless pairing knows about. One registry, not two.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Registry {
     pub selected: Option<String>,
+    pub settings: BTreeMap<String, CameraSettings>,
+    pub phones: Vec<KnownPhone>,
+}
+
+impl Registry {
+    fn migrate_hardware_ids(&mut self) {
+        for phone in &mut self.phones {
+            if phone.hardware_id.is_none() && phone.transport == crate::protocol::Transport::Wired {
+                phone.hardware_id = Some(phone.phone.serial.clone());
+            } else if phone.hardware_id.is_none()
+                && !phone.id.is_empty()
+                && phone.connect_address.as_deref() != Some(&phone.id)
+                // ponytail: old registries have no identity provenance; version the
+                // format if Android ever emits hardware IDs shaped like endpoints.
+                && !valid_endpoint(&phone.id)
+            {
+                phone.hardware_id = Some(phone.id.clone());
+            }
+        }
+    }
 }
 
 fn registry_path(state_dir: &Path) -> PathBuf {
@@ -172,10 +272,12 @@ pub fn load(state_dir: &Path) -> Registry {
             return Registry::default();
         }
     };
-    serde_json::from_str(&text).unwrap_or_else(|e| {
+    let mut registry = serde_json::from_str(&text).unwrap_or_else(|e| {
         eprintln!("omavcam: could not parse {}: {e}", path.display());
         Registry::default()
-    })
+    });
+    registry.migrate_hardware_ids();
+    registry
 }
 
 pub fn save(state_dir: &Path, registry: &Registry) -> std::io::Result<()> {
@@ -258,5 +360,39 @@ mod tests {
     fn the_registry_accepts_fields_added_after_an_older_file_was_written() {
         let registry: Registry = serde_json::from_str("{}").unwrap();
         assert_eq!(registry.selected, None);
+    }
+
+    #[test]
+    fn migration_distinguishes_old_hardware_ids_from_changed_endpoints() {
+        let mut registry = Registry {
+            phones: vec![
+                KnownPhone {
+                    id: "device-id".into(),
+                    hardware_id: None,
+                    phone: Phone {
+                        serial: "192.0.2.1:40000".into(),
+                        name: "Pixel".into(),
+                    },
+                    transport: crate::protocol::Transport::Wireless,
+                    connect_address: Some("192.0.2.1:40000".into()),
+                },
+                KnownPhone {
+                    id: "192.0.2.1:39000".into(),
+                    hardware_id: None,
+                    phone: Phone {
+                        serial: "192.0.2.1:40000".into(),
+                        name: "Pixel".into(),
+                    },
+                    transport: crate::protocol::Transport::Wireless,
+                    connect_address: Some("192.0.2.1:40000".into()),
+                },
+            ],
+            ..Registry::default()
+        };
+
+        registry.migrate_hardware_ids();
+
+        assert_eq!(registry.phones[0].hardware_id.as_deref(), Some("device-id"));
+        assert_eq!(registry.phones[1].hardware_id, None);
     }
 }

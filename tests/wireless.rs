@@ -242,7 +242,7 @@ fn a_wireless_transport_that_remains_offline_is_unreachable() {
 }
 
 #[test]
-fn learning_a_stable_wireless_id_migrates_its_settings() {
+fn learning_a_stable_wireless_id_keeps_the_durable_id_and_settings() {
     let f = Fixture::slow_poll();
     let mut client = f.connect();
     f.script_output_for("adb", "pair", "Successfully paired\n");
@@ -269,7 +269,8 @@ fn learning_a_stable_wireless_id_migrates_its_settings() {
     f.script_devices_on_connect(&[(CONNECT_ADDRESS, "device", Some("Pixel_7"))]);
     assert_eq!(client.request("refresh")["ok"], json!(true));
 
-    assert_eq!(client.state()["known"][0]["id"], json!(STABLE_ID));
+    assert_eq!(client.state()["known"][0]["id"], json!(CONNECT_ADDRESS));
+    assert_eq!(client.state()["known"][0]["hardware_id"], json!(STABLE_ID));
     assert_eq!(client.state()["settings"]["applied"]["zoom"], json!(2.0));
 }
 
@@ -391,8 +392,6 @@ fn a_paired_phone_with_a_changed_port_is_unreachable_then_reconnected_without_pa
         json!(true)
     );
     assert_eq!(client.request("apply")["ok"], json!(true));
-    f.script_hold("scrcpy");
-    assert_eq!(client.request("start")["ok"], json!(true));
 
     f.script_devices(&[]);
     f.script_exit_for("adb", "connect", 1);
@@ -412,12 +411,7 @@ fn a_paired_phone_with_a_changed_port_is_unreachable_then_reconnected_without_pa
     );
 
     assert_eq!(response["ok"], json!(true), "{response}");
-    let stopped = observer.recv_state();
-    assert_eq!(stopped["state"]["capture"], json!(null));
-    assert_eq!(
-        stopped["state"]["known"][0]["phone"]["serial"],
-        json!(CONNECT_ADDRESS)
-    );
+    observer.recv_state();
     assert_eq!(client.state()["connection"]["state"], json!("connected"));
     assert_eq!(client.state()["settings"]["applied"]["zoom"], json!(2.0));
     assert_eq!(

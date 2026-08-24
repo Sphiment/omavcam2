@@ -1033,6 +1033,12 @@ fn remember_wireless(
         known.phone = phone.clone();
         known.transport = Transport::Wireless;
         known.connect_address = Some(address.to_string());
+        // A wireless phone can have been remembered from `adb devices` before
+        // pairing, where its endpoint was the only serial there was. An
+        // endpoint recorded as identity is no identity at all.
+        if known.hardware_id.as_deref() == Some(address) {
+            known.hardware_id = None;
+        }
         if let Some(id) = stable_id {
             known.hardware_id = Some(id.to_string());
         }
@@ -1290,7 +1296,34 @@ fn update_connect_address(
         )
     };
     if capture_uses_old_address {
-        stop_capture_locked(shared);
+        // The phone proved its identity at the new endpoint, so the logical
+        // capture follows it. Only the writer bound to the old serial dies;
+        // the refresh below resumes it at the new one (ADR: reconnect, #11).
+        let child = shared.lock().unwrap().capture.take();
+        if let Some(mut child) = child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let mut inner = shared.lock().unwrap();
+        let old_serial = inner
+            .state
+            .capture
+            .as_ref()
+            .map(|capture| capture.phone.serial.clone());
+        if let Some(capture) = inner.state.capture.as_mut() {
+            capture.phone = Phone {
+                serial: connect_address.to_string(),
+                name: found.name.clone(),
+            };
+        }
+        if let Some(settings) = inner
+            .state
+            .settings
+            .as_mut()
+            .filter(|settings| Some(&settings.phone) == old_serial.as_ref())
+        {
+            settings.phone = connect_address.to_string();
+        }
     }
     let phone = remember_wireless(
         shared,

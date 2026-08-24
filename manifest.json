@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "id": "sphiment.omavcam",
-  "name": "omavcam",
+  "id": "sphiment.omavcam2",
+  "name": "omavcam2",
   "version": "0.1.0",
   "author": "Sphiment",
   "description": "Turn an Android phone into a webcam, with capture and floating-preview controls in the bar.",

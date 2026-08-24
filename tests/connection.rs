@@ -288,3 +288,89 @@ fn select_with_no_serial_says_which_phones_are_attached() {
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains(PIXEL), "{stderr}");
 }
+
+/// The attached phones are a fact about the world, not a property of one
+/// connection state: a client can only offer the choice at a moment omavcam is
+/// not asking for one if it is told what is there even while a phone is
+/// selected (#18).
+#[test]
+fn every_connection_state_carries_the_attached_phones() {
+    let f = Fixture::start();
+    let mut client = f.connect();
+
+    // Reported by adb in the opposite order to the one they come back in: the
+    // list is sorted by serial, so no client sees two phones swap places.
+    f.script_devices(&[
+        (GALAXY, "unauthorized", None),
+        (PIXEL, "device", Some("Pixel_7")),
+    ]);
+
+    let state = client.await_state("both phones to be listed", |s| {
+        s["attached"].as_array().is_some_and(|a| a.len() == 2)
+    });
+    assert_eq!(state["attached"][0]["phone"]["serial"], json!(PIXEL));
+    assert_eq!(state["attached"][0]["authorised"], json!(true));
+    // Listed, because a phone that needs one tap is not a phone that is
+    // missing — but named as one that will not answer.
+    assert_eq!(state["attached"][1]["phone"]["serial"], json!(GALAXY));
+    assert_eq!(state["attached"][1]["authorised"], json!(false));
+
+    // ...and it survives the phase changing under it.
+    client.request_with("select", json!({"serial": PIXEL}));
+    let state = client.await_state("the phone to connect", is("connected"));
+    assert_eq!(
+        state["attached"].as_array().map(Vec::len),
+        Some(2),
+        "the other phone is still on the desk: {state}"
+    );
+}
+
+/// The state is compared whole to decide whether anything happened, so a list
+/// whose order follows adb's would push identical state to every client and
+/// spend a revision on it.
+#[test]
+fn adb_reordering_its_output_is_not_a_change() {
+    let f = Fixture::start();
+    let mut client = f.connect();
+    f.script_devices(&[
+        (PIXEL, "device", Some("Pixel_7")),
+        (GALAXY, "device", Some("Galaxy_S21")),
+    ]);
+    client.await_state("the choice to be offered", is("unselected"));
+    let settled = client.request("status")["rev"].clone();
+
+    f.script_devices(&[
+        (GALAXY, "device", Some("Galaxy_S21")),
+        (PIXEL, "device", Some("Pixel_7")),
+    ]);
+    std::thread::sleep(Duration::from_millis(200));
+
+    assert_eq!(
+        client.request("status")["rev"],
+        settled,
+        "the same phones in another order are the same phones"
+    );
+}
+
+/// Choosing the phone that is already chosen changes nothing, and the panel
+/// that offers a picker in every state is the thing most likely to ask.
+#[test]
+fn selecting_the_selected_phone_burns_no_revision() {
+    let f = Fixture::start();
+    let mut client = f.connect();
+    f.script_devices(&[
+        (PIXEL, "device", Some("Pixel_7")),
+        (GALAXY, "device", Some("Galaxy_S21")),
+    ]);
+    client.await_state("the choice to be offered", is("unselected"));
+
+    let first = client.request_with("select", json!({"serial": PIXEL}));
+    let again = client.request_with("select", json!({"serial": PIXEL}));
+
+    assert_eq!(first["ok"], json!(true));
+    assert_eq!(again["ok"], json!(true));
+    assert_eq!(
+        again["rev"], first["rev"],
+        "the revision counts changes, not requests"
+    );
+}

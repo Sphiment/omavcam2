@@ -13,9 +13,9 @@ import qs.Ui
 // socket is systemd's, and something connecting to it is the only thing that
 // starts the service behind it.
 //
-// The panel is deliberately thin — a light, a switch, and a picker while no
-// phone is chosen (ADR-0007). Settings live in Studio, never here: the
-// frequent action has to be instant.
+// The panel is deliberately thin — a light, a switch, and the phones whenever
+// there is more than one to point at (ADR-0007). Settings live in Studio,
+// never here: the frequent action has to be instant.
 Panel {
   id: root
   moduleName: "omavcam"
@@ -53,11 +53,34 @@ Panel {
     ? (!daemonState.adb_ok || connectionState === "unauthorised")
     : unreachable
 
-  // A choice to make. The daemon offers the phones only while none is chosen,
-  // which is exactly when a picker is worth the space — once one is
-  // remembered, pointing the webcam somewhere else is a deliberate act and
-  // belongs to `omavcam select` (ADR-0007).
-  readonly property var choices: connectionState === "unselected" ? daemonState.connection.available : []
+  // The phone the connection names, in whatever phase it is in.
+  readonly property string selectedSerial: {
+    var connection = daemonState ? daemonState.connection : null
+    return connection && connection.phone ? connection.phone.serial : ""
+  }
+
+  // The phones worth offering. One phone that is already the one in use is no
+  // choice at all; anything else is — two on the desk, or one that has never
+  // been picked because a different phone is the remembered one.
+  //
+  // Read from the state's own list rather than from `Unselected.available`,
+  // which is the same phones and goes away when the protocol version next
+  // moves.
+  readonly property var choices: {
+    if (!daemonState) return []
+    var attached = daemonState.attached || []
+    if (attached.length === 1 && attached[0].phone.serial === selectedSerial) return []
+    return attached
+  }
+
+  // What the picker has to say before someone clicks it, not after.
+  function pickerNote() {
+    var notes = []
+    if (capturing) notes.push("Switching stops the capture")
+    if (choices.some(function (phone) { return !phone.authorised }))
+      notes.push("A dimmed phone has not accepted the debugging prompt")
+    return notes.join(" · ")
+  }
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
@@ -108,7 +131,7 @@ Panel {
     if (!daemonState.adb_ok) return "adb unavailable"
     var connection = daemonState.connection
     if (connection.state === "no_phone") return "No phone"
-    if (connection.state === "unselected") return connection.available.length + " phones attached, none chosen"
+    if (connection.state === "unselected") return daemonState.attached.length + " phones attached, none chosen"
     if (connection.state === "unauthorised") return connection.phone.name + " has not accepted the debugging prompt"
     if (connection.state === "connecting") return "Connecting to " + connection.phone.name
     if (connection.state === "connected") return connection.phone.name + " connected"
@@ -268,19 +291,38 @@ Panel {
             fontFamily: root.fontFamily
           }
 
+          // One line explains every dimmed row, and warns about the one
+          // click in this panel that takes something away.
+          Text {
+            width: parent.width
+            text: root.pickerNote()
+            visible: text !== ""
+            color: root.capturing ? root.urgent : Qt.darker(root.foreground, 1.4)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
           Repeater {
             model: root.choices
 
             Button {
               required property var modelData
               width: parent.width
-              text: modelData.name
+              text: modelData.phone.name
               iconText: "" // nf-fa-mobile
               leftAlign: true
+              // The one in use, so a picker offered in every state still says
+              // which phone the webcam is pointed at.
+              selected: modelData.phone.serial === root.selectedSerial
+              // Dimmed, not disabled: selecting it is how the panel comes to
+              // say which phone needs the prompt accepted, and a row that
+              // cannot be clicked is a dead end instead of an instruction.
+              opacity: modelData.authorised ? 1 : 0.55
               foreground: root.foreground
               fontFamily: root.fontFamily
-              tooltipText: modelData.serial
-              onClicked: root.send("select", modelData.serial)
+              tooltipText: modelData.phone.serial
+              onClicked: root.send("select", modelData.phone.serial)
             }
           }
         }

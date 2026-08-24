@@ -19,7 +19,7 @@ use crate::protocol::{
     error_message, ok_message, socket_path, state_message, Capture, Connection, State, MAX_MESSAGE,
     VERSION,
 };
-use crate::{capture, command};
+use crate::{capture, command, protocol};
 
 /// How often the daemon asks adb what is attached. adb has no way to tell us —
 /// this one cannot discover devices at all (ADR-0006) — so it is asked.
@@ -114,9 +114,13 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
         Ok(attached) => attached,
         Err(e) => {
             eprintln!("omavcam: could not scan phones: {e}");
+            // adb cannot see anything, so neither can we. Leaving the last
+            // list standing would offer a picker full of phones nothing has
+            // confirmed are still there.
             let state = State {
                 adb_ok: false,
                 connection: Connection::NoPhone,
+                attached: Vec::new(),
                 ..shared.lock().unwrap().state.clone()
             };
             publish(shared, state);
@@ -147,11 +151,12 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
         }
         _ => connection,
     };
-    publish_connection(shared, connection.clone());
+    let listed: Vec<protocol::Attached> = attached.iter().map(Into::into).collect();
+    publish_connection(shared, connection.clone(), listed.clone());
 
     if let Connection::Connecting { phone } = connection {
         if phones::connect(&phone.serial) {
-            publish_connection(shared, Connection::Connected { phone });
+            publish_connection(shared, Connection::Connected { phone }, listed);
         }
         // If it did not answer we stay in Connecting and the next pass tries
         // again — a phone that is booting or half-asleep needs no error.
@@ -159,10 +164,11 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
     true
 }
 
-fn publish_connection(shared: &Shared, connection: Connection) {
+fn publish_connection(shared: &Shared, connection: Connection, attached: Vec<protocol::Attached>) {
     let state = State {
         adb_ok: true,
         connection,
+        attached,
         ..shared.lock().unwrap().state.clone()
     };
     publish(shared, state);
@@ -295,6 +301,7 @@ fn refresh_adb(shared: &Shared) -> bool {
         let state = State {
             adb_ok: false,
             connection: Connection::NoPhone,
+            attached: Vec::new(),
             ..shared.lock().unwrap().state.clone()
         };
         publish(shared, state);

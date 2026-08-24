@@ -36,7 +36,13 @@ pub fn scan() -> std::io::Result<Vec<Attached>> {
             out.status
         )));
     }
-    Ok(parse(&String::from_utf8_lossy(&out.stdout)))
+    let mut phones = parse(&String::from_utf8_lossy(&out.stdout));
+    // adb's order is not a promise, and this list reaches the state, which is
+    // compared whole to decide whether anything changed. Unsorted, two phones
+    // could swap places between polls and push an identical state to every
+    // client while burning a revision for it.
+    phones.sort_by(|a, b| a.serial.cmp(&b.serial));
+    Ok(phones)
 }
 
 /// Ask the selected phone directly whether it is there. This is the step that
@@ -125,6 +131,18 @@ impl From<&Attached> for Phone {
         Phone {
             serial: attached.serial.clone(),
             name: attached.name.clone(),
+        }
+    }
+}
+
+/// What a client is told about an attached phone. `adb_state` does not travel:
+/// it is adb's own vocabulary, and the only part of it a client can act on is
+/// whether the phone will answer.
+impl From<&Attached> for crate::protocol::Attached {
+    fn from(attached: &Attached) -> crate::protocol::Attached {
+        crate::protocol::Attached {
+            phone: Phone::from(attached),
+            authorised: attached.adb_state != "unauthorized",
         }
     }
 }

@@ -121,8 +121,8 @@ _Avoid_: settings window, editor, panel
 
 **Panel**:
 The popup behind the bar widget. A status light, a switch, a way into Studio,
-and — only while no phone is chosen — the picker (ADR-0007). Never the place
-where settings are configured.
+and the picker whenever more than one phone is attached (ADR-0007). Never the
+place where settings are configured.
 _Avoid_: widget, popup, menu
 
 **Preview**:

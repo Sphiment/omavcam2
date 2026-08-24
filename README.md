@@ -160,12 +160,14 @@ can fix — adb missing, the daemon unreachable, a phone that has not accepted
 the debugging prompt. Finding that out before the call is the entire point.
 
 Clicking it opens the **panel**: a status light, the connection in words, and
-the switch that starts and stops the capture. When several phones are attached
-and none is chosen, the panel offers them and picking one takes effect — that
-is the whole of the picker, because once a phone is remembered there is no
-choice left to make and pointing the webcam at the other one is the deliberate
-act `omavcam select` exists for. Nothing else goes in there — settings are
-Studio's job, and the frequent action has to be instant.
+the switch that starts and stops the capture. Whenever more than one phone is
+attached the panel offers them and picking one takes effect — whatever phase
+the connection is in, because the second phone appearing on the desk is the
+moment someone wants to switch. The phone in use is marked, one that has not
+accepted the debugging prompt is dimmed and said to be, and switching while a
+capture is running says it will stop the capture before it does. Nothing else
+goes in there — settings are Studio's job, and the frequent action has to be
+instant.
 
 The plugin holds no state and makes no system calls. It opens the socket,
 renders what it is pushed, and sends requests; every `scrcpy`, `adb` and

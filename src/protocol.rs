@@ -42,6 +42,22 @@ pub struct State {
     /// The running capture, or nothing. There is no third state: a capture
     /// that has stopped, however it stopped, is a capture that is not there.
     pub capture: Option<Capture>,
+    /// Every phone adb can see, whatever phase the connection is in. A fact
+    /// about the world rather than a property of one connection state, which
+    /// is what lets a client offer the choice at a moment when omavcam is not
+    /// asking for one.
+    #[serde(default)]
+    pub attached: Vec<Attached>,
+}
+
+/// One phone adb reports, and whether adb will talk to it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Attached {
+    pub phone: Phone,
+    /// False while the debugging prompt has not been accepted. Such a phone is
+    /// still listed: hiding it makes a phone that needs one tap look like a
+    /// phone that is not plugged in.
+    pub authorised: bool,
 }
 
 /// One running stream from a phone into the virtual camera. Everything about
@@ -79,6 +95,11 @@ pub enum Connection {
     #[default]
     NoPhone,
     /// Several attached and none chosen. omavcam does not pick for you.
+    ///
+    /// `available` is the same phones as the state's `attached`, and is kept
+    /// only because removing it would break every client that reads it — the
+    /// one thing the protocol version exists to prevent. It goes when the
+    /// version next moves.
     Unselected {
         available: Vec<Phone>,
     },

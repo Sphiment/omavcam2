@@ -55,14 +55,23 @@ Studio owns the flow, because guides and error states do not belong in a bar
 popup. The panel shows connection state and a button that opens Studio at the
 right place. The panel stays a status light and a switch.
 
-**Amended (#6): plus the picker, while nothing is chosen.** Choosing between
-two attached phones is the one step of this machine that is a choice rather
-than a guide — there is nothing to explain and nothing that can fail, only two
-names and a click. Sending someone to Studio to click one of two buttons costs
-more than it teaches, and the panel is where they already are. It stays out of
-the panel in every other state: once a phone is remembered there is no choice
-left to make, and repointing the webcam at the other phone is a deliberate act
-that stops a running capture, which belongs with the rest of the flow.
+**Amended (#6, widened by #18): plus the picker, whenever there is more than
+one phone to point at.** Choosing between two attached phones is the one step
+of this machine that is a choice rather than a guide — there is nothing to
+explain and nothing that can fail, only two names and a click. Sending someone
+to Studio to click one of two buttons costs more than it teaches, and the panel
+is where they already are.
+
+It is offered whatever phase the connection is in, not only while nothing is
+chosen. The second phone appearing on the desk is the moment someone wants to
+switch, and a panel that shows a picker then and hides it a second later, once
+the daemon has remembered a phone, is a panel that hid the thing they came for.
+
+None of that changes the rule underneath: **omavcam never repoints itself.**
+The picker is a person clicking, which is what makes it safe to put where the
+frequent actions are. The one phone that is already in use is not offered,
+because that is not a choice; and because switching stops a running capture,
+the picker says so before it is clicked rather than after.
 
 ## Losing the phone mid-capture
 

@@ -18,6 +18,31 @@ fn status_prints_the_state_and_exits_zero() {
 }
 
 #[test]
+fn a_second_manual_daemon_does_not_steal_the_live_socket() {
+    let f = Fixture::start();
+
+    let second = f
+        .daemon_command(env!("CARGO_BIN_EXE_omavcam"))
+        .arg("daemon")
+        .output()
+        .unwrap();
+
+    assert_eq!(second.status.code(), Some(2));
+    let mut client = f.connect();
+    assert_eq!(client.request("status")["ok"], json!(true));
+}
+
+#[test]
+fn extra_cli_arguments_are_rejected_instead_of_ignored() {
+    let f = Fixture::start();
+
+    let out = f.cli(&["status", "surprise"]);
+
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8(out.stderr).unwrap().contains("usage:"));
+}
+
+#[test]
 fn status_starts_the_daemon_on_demand_via_socket_activation() {
     let f = Fixture::activated();
     // Nothing is running yet: the socket exists, the daemon does not.
@@ -34,6 +59,22 @@ fn status_starts_the_daemon_on_demand_via_socket_activation() {
         f.argv().iter().any(|line| line == "adb start-server"),
         "the activated daemon ran its startup probe, so it really started"
     );
+}
+
+#[test]
+fn the_first_activated_status_includes_an_already_attached_phone() {
+    let f = Fixture::activated_with_devices(&[("39281FDJH0031T", "device", Some("Pixel_7"))]);
+
+    let out = f.cli(&["status"]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("Pixel 7"), "{stdout}");
+    assert!(stdout.contains("connected"), "{stdout}");
 }
 
 #[test]
@@ -80,8 +121,11 @@ fn every_client_is_pushed_the_whole_state_when_it_changes() {
         after["rev"].as_u64().unwrap() > before["rev"].as_u64().unwrap(),
         "revision must increase: {before} then {after}"
     );
-    assert!(after["state"]["phone"].is_null(), "state is pushed whole");
-    assert_eq!(after["v"], json!(1));
+    let state = after["state"].as_object().expect("state is an object");
+    assert!(state.contains_key("adb_ok"), "state is pushed whole");
+    assert!(state.contains_key("connection"), "state is pushed whole");
+    assert!(state.contains_key("capture"), "state is pushed whole");
+    assert_eq!(after["v"], json!(2));
 }
 
 #[test]
@@ -163,7 +207,26 @@ fn a_message_past_the_bound_is_rejected() {
     client.recv_state();
 
     let huge = "x".repeat(200 * 1024);
-    client.send_raw(&json!({"v": 1, "id": "x", "kind": huge}).to_string());
+    client.send_raw(&json!({"v": 2, "id": "x", "kind": huge}).to_string());
+
+    let response = client.recv();
+    assert_eq!(response["error"]["code"], json!("message_too_large"));
+}
+
+#[test]
+fn a_newline_one_byte_past_the_bound_is_rejected() {
+    let f = Fixture::start();
+    let mut client = f.connect();
+    client.recv_state();
+    let prefix = r#"{"v":2,"id":"x","kind":""#;
+    let suffix = r#""}"#;
+    let raw = format!(
+        "{prefix}{}{suffix}",
+        "x".repeat(64 * 1024 - prefix.len() - suffix.len())
+    );
+    assert_eq!(raw.len(), 64 * 1024);
+
+    client.send_raw(&raw);
 
     let response = client.recv();
     assert_eq!(response["error"]["code"], json!("message_too_large"));

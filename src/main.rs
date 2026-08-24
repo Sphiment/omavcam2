@@ -1,4 +1,5 @@
 mod capture;
+mod command;
 mod daemon;
 mod phones;
 mod protocol;
@@ -16,29 +17,36 @@ use protocol::{socket_path, Connection, Phone, State, VERSION};
 /// one leaves a message rather than a hung terminal. Under socket activation
 /// `connect()` succeeds whether or not the daemon can actually start, so this
 /// is the timeout that catches a daemon failing to come up.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
-    match (args.next().as_deref(), args.next()) {
-        (Some("daemon"), _) => match daemon::run() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.as_slice() {
+        [command] if command == "daemon" => match daemon::run() {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("omavcam: {e}");
                 ExitCode::from(2)
             }
         },
-        (Some(kind @ ("status" | "refresh" | "start" | "stop")), _) => request(kind, json!({})),
+        [kind] if matches!(kind.as_str(), "status" | "refresh" | "start" | "stop") => {
+            request(kind, json!({}))
+        }
+        // Opt-in, because it changes a setting on someone's phone.
+        [command, flag] if command == "start" && flag == "--stay-awake" => {
+            request("start", json!({"stay_awake": true}))
+        }
         // A bare `select` goes to the daemon too: its error is what lists the
         // phones that are attached.
-        (Some("select"), serial) => {
-            request("select", json!({"serial": serial.unwrap_or_default()}))
-        }
-        (other, _) => {
-            if let Some(other) = other {
-                eprintln!("omavcam: unknown command: {other}");
+        [command] if command == "select" => request("select", json!({"serial": ""})),
+        [command, serial] if command == "select" => request("select", json!({"serial": serial})),
+        other => {
+            if let Some(command) = other.first() {
+                eprintln!("omavcam: invalid command: {command}");
             }
-            eprintln!("usage: omavcam [status|refresh|select <serial>|start|stop|daemon]");
+            eprintln!(
+                "usage: omavcam [status|refresh|select <serial>|start [--stay-awake]|stop|daemon]"
+            );
             ExitCode::from(2)
         }
     }
@@ -66,11 +74,23 @@ fn request(kind: &str, args: Value) -> ExitCode {
     if response["ok"] == Value::Bool(true) {
         return ExitCode::SUCCESS;
     }
+    let code = response["error"]["code"].as_str().unwrap_or("error");
     eprintln!(
-        "omavcam: {}: {}",
-        response["error"]["code"].as_str().unwrap_or("error"),
+        "omavcam: {code}: {}",
         response["error"]["message"].as_str().unwrap_or(""),
     );
+    // Not part of the error: the daemon cannot tell why scrcpy gave up, and
+    // both tips are things only the person holding the phone can act on. The
+    // phone does not need unlocking — measured, both lenses capture fine with
+    // the screen off and the lockscreen up.
+    if code == "capture_failed" {
+        eprintln!(
+            "tip: another app on the phone may be holding the camera — close it, or wait a \
+             moment after locking or unlocking, and try again\n\
+             tip: `omavcam start --stay-awake` keeps the screen on while the phone is plugged \
+             in, so the screen turning off mid-capture cannot disconnect the camera"
+        );
+    }
     ExitCode::FAILURE
 }
 
@@ -99,7 +119,17 @@ fn render(state: &State) -> String {
         if state.adb_ok { "ok" } else { "unavailable" },
         match &state.capture {
             None => "none".to_string(),
-            Some(c) => format!("{} from {} to {}", c.size, phone(&c.phone), c.node),
+            Some(c) => format!(
+                "{} from {} to {}{}",
+                c.size,
+                phone(&c.phone),
+                c.node,
+                if c.stay_awake {
+                    " — staying awake"
+                } else {
+                    ""
+                }
+            ),
         },
     )
 }
@@ -135,6 +165,13 @@ fn call(kind: &str, args: Value) -> std::io::Result<(State, Value)> {
             ));
         }
         let msg: Value = serde_json::from_str(&line)?;
+        let peer_version = msg.get("v").and_then(Value::as_u64);
+        if peer_version != Some(VERSION as u64) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("daemon speaks protocol {peer_version:?}, client expects {VERSION}"),
+            ));
+        }
         match msg["type"].as_str() {
             Some("state") => {
                 let state = serde_json::from_value(msg["state"].clone())?;

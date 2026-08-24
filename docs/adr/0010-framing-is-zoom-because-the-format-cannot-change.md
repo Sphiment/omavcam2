@@ -112,8 +112,9 @@ capture starts rather than derived from lens or crop. `--camera-size` still sets
 it, and it still costs roughly 4x the pipeline CPU, but changing it is subject
 to the same restriction as crop.
 
-The relay is not dead — it stays the answer if off-centre framing during a call
-ever becomes a requirement worth 25% CPU. It is deliberately not the answer now.
+The relay is the on-demand answer for off-centre framing. It is absent from the
+centred and untouched paths, so its CPU cost is paid only while that feature is
+actually active.
 
 ## What this means for holding the last frame
 

@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
+const PROTOCOL_VERSION: u32 = 2;
 
 pub struct Fixture {
     dir: PathBuf,
@@ -54,36 +55,50 @@ impl Fixture {
     /// first connection execs the daemon with the listener on fd 3.
     pub fn activated() -> Fixture {
         let mut fixture = Fixture::new();
+        fixture.activate();
+        fixture
+    }
+
+    /// Socket activation with the desk already populated, which exercises the
+    /// first state a freshly started daemon gives its triggering client.
+    pub fn activated_with_devices(attached: &[(&str, &str, Option<&str>)]) -> Fixture {
+        let mut fixture = Fixture::new();
+        fixture.script_devices(attached);
+        fixture.activate();
+        fixture
+    }
+
+    fn activate(&mut self) {
         // systemd-socket-activate hands the child a curated environment — PATH
         // survives, anything of ours does not — so the daemon's own variables
         // have to go through --setenv.
-        fixture.daemon = Some(
-            fixture
-                .daemon_command("systemd-socket-activate")
-                .args(["-l", fixture.socket.to_str().unwrap()])
+        self.daemon = Some(
+            self.daemon_command("systemd-socket-activate")
+                .args(["-l", self.socket.to_str().unwrap()])
                 .args([
                     format!(
                         "--setenv=OMAVCAM_STATE_DIR={}",
-                        fixture.dir.join("state").display()
+                        self.dir.join("state").display()
                     ),
-                    format!("--setenv=OMAVCAM_STUB_LOG={}", fixture.log.display()),
-                    format!("--setenv=OMAVCAM_STUB_DIR={}", fixture.stub_dir.display()),
+                    format!("--setenv=OMAVCAM_STUB_LOG={}", self.log.display()),
+                    format!("--setenv=OMAVCAM_STUB_DIR={}", self.stub_dir.display()),
                     format!(
                         "--setenv=OMAVCAM_V4L2_DIR={}",
-                        fixture.dir.join("sys").display()
+                        self.dir.join("sys").display()
                     ),
-                    format!("--setenv=OMAVCAM_POLL_MS={}", fixture.poll_ms),
+                    "--setenv=OMAVCAM_STARTUP_MS=500".to_string(),
+                    "--setenv=OMAVCAM_COMMAND_MS=100".to_string(),
+                    format!("--setenv=OMAVCAM_POLL_MS={}", self.poll_ms),
                 ])
                 .args([env!("CARGO_BIN_EXE_omavcam"), "daemon"])
                 .spawn()
                 .unwrap(),
         );
         let deadline = Instant::now() + TIMEOUT;
-        while !fixture.socket.exists() {
+        while !self.socket.exists() {
             assert!(Instant::now() < deadline, "socket never appeared");
             std::thread::sleep(Duration::from_millis(10));
         }
-        fixture
     }
 
     pub fn new() -> Fixture {
@@ -146,6 +161,8 @@ impl Fixture {
             .env("OMAVCAM_STUB_LOG", &self.log)
             .env("OMAVCAM_STUB_DIR", &self.stub_dir)
             .env("OMAVCAM_V4L2_DIR", self.dir.join("sys"))
+            .env("OMAVCAM_STARTUP_MS", "500")
+            .env("OMAVCAM_COMMAND_MS", "100")
             // The daemon polls adb for attached phones; tests should not wait a
             // real second for a plug or an unplug to be noticed.
             .env("OMAVCAM_POLL_MS", &self.poll_ms)
@@ -226,11 +243,15 @@ impl Fixture {
     /// laptop's own webcam is always there, so a lookup that ignores the label
     /// finds the wrong node. `None` is the module not loaded at all.
     pub fn script_virtual_camera(&self, node: Option<&str>) {
+        self.script_virtual_cameras(node.as_slice());
+    }
+
+    pub fn script_virtual_cameras(&self, nodes: &[&str]) {
         let sys = self.dir.join("sys");
         let _ = fs::remove_dir_all(&sys);
         fs::create_dir_all(sys.join("video0")).unwrap();
         fs::write(sys.join("video0/name"), "HP Wide Vision HD Camera\n").unwrap();
-        if let Some(node) = node {
+        for node in nodes {
             fs::create_dir_all(sys.join(node)).unwrap();
             fs::write(sys.join(node).join("name"), "omavcam\n").unwrap();
         }
@@ -261,6 +282,14 @@ impl Fixture {
 
     pub fn script_exit(&self, tool: &str, code: i32) {
         fs::write(self.stub_dir.join(format!("{tool}.code")), code.to_string()).unwrap();
+    }
+
+    pub fn script_exit_for(&self, tool: &str, command: &str, code: i32) {
+        fs::write(
+            self.stub_dir.join(format!("{tool}.{command}.code")),
+            code.to_string(),
+        )
+        .unwrap();
     }
 
     /// What `adb devices -l` prints from now on: one `(serial, adb's word for
@@ -359,7 +388,7 @@ impl Client {
     pub fn request_with(&mut self, kind: &str, extra: Value) -> Value {
         self.next_id += 1;
         let id = self.next_id.to_string();
-        let mut request = json!({"v": 1, "id": id, "kind": kind});
+        let mut request = json!({"v": PROTOCOL_VERSION, "id": id, "kind": kind});
         for (key, value) in extra.as_object().unwrap() {
             request[key] = value.clone();
         }

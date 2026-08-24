@@ -4,6 +4,7 @@
 mod common;
 
 use std::fs;
+use std::sync::{Arc, Barrier};
 
 use common::{Client, Fixture};
 use serde_json::{json, Value};
@@ -72,6 +73,29 @@ fn the_virtual_camera_is_found_by_its_card_label() {
 }
 
 #[test]
+fn duplicate_public_labels_are_a_packaging_error_not_a_guess() {
+    let (f, mut client) = ready();
+    f.script_virtual_cameras(&["video7", "video42"]);
+
+    let response = client.request("start");
+
+    assert_eq!(response["ok"], json!(false), "{response}");
+    assert_eq!(response["error"]["code"], json!("no_virtual_camera"));
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("more than one"),
+        "{response}"
+    );
+    assert!(
+        !f.argv().iter().any(|call| call.starts_with("scrcpy ")),
+        "no arbitrary node was chosen: {:?}",
+        f.argv()
+    );
+}
+
+#[test]
 fn no_video_node_path_is_hardcoded() {
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     for entry in fs::read_dir(src).unwrap() {
@@ -107,13 +131,30 @@ fn the_virtual_cameras_controls_are_set_before_anything_writes_to_it() {
         .unwrap();
     assert!(ctl < scrcpy, "the controls are set first: {argv:?}");
     assert!(argv[ctl].contains("/dev/video42"), "{}", argv[ctl]);
-    for control in ["keep_format", "sustain_framerate", "timeout"] {
+    for control in ["keep_format=0", "sustain_framerate=1", "timeout=1000"] {
         assert!(
             argv[ctl].contains(control),
             "{control} unset: {}",
             argv[ctl]
         );
     }
+}
+
+#[test]
+fn an_immediate_scrcpy_failure_is_a_failed_start() {
+    let f = Fixture::start();
+    f.script_exit("scrcpy", 2);
+    f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
+    let mut client = f.connect();
+    client.await_state("the phone to connect", |state| {
+        state["connection"]["state"] == json!("connected")
+    });
+
+    let response = client.request("start");
+
+    assert_eq!(response["ok"], json!(false), "{response}");
+    assert_eq!(response["error"]["code"], json!("capture_failed"));
+    assert!(client.state()["capture"].is_null());
 }
 
 #[test]
@@ -201,6 +242,56 @@ fn starting_a_capture_that_is_already_running_leaves_it_alone() {
         1,
         "the running capture was not replaced: {:?}",
         f.argv()
+    );
+}
+
+#[test]
+fn simultaneous_start_requests_launch_only_one_capture() {
+    let (f, mut first) = ready();
+    let mut second = f.connect();
+    let barrier = Arc::new(Barrier::new(2));
+
+    let (a, b) = std::thread::scope(|scope| {
+        let first_barrier = Arc::clone(&barrier);
+        let a = scope.spawn(move || {
+            first_barrier.wait();
+            first.request("start")
+        });
+        let second_barrier = Arc::clone(&barrier);
+        let b = scope.spawn(move || {
+            second_barrier.wait();
+            second.request("start")
+        });
+        (a.join().unwrap(), b.join().unwrap())
+    });
+
+    assert_eq!(a["ok"], json!(true), "{a}");
+    assert_eq!(b["ok"], json!(true), "{b}");
+    let calls = f.await_argv("scrcpy", 1);
+    assert_eq!(
+        calls.len(),
+        1,
+        "one capture process owns the node: {calls:?}"
+    );
+}
+
+#[test]
+fn selecting_another_phone_stops_the_running_capture() {
+    let (f, mut client) = ready();
+    client.request("start");
+    client.await_state("the capture to be running", running);
+    f.script_devices(&[
+        (PIXEL, "device", Some("Pixel_7")),
+        (GALAXY, "device", Some("Galaxy_S21")),
+    ]);
+
+    let response = client.request_with("select", json!({"serial": GALAXY}));
+
+    assert_eq!(response["ok"], json!(true), "{response}");
+    assert!(client.state()["capture"].is_null());
+    assert_eq!(
+        client.state()["connection"]["phone"]["serial"],
+        json!(GALAXY)
     );
 }
 
@@ -331,4 +422,51 @@ fn starting_again_after_the_capture_died_launches_a_new_one() {
         "the dead capture was replaced, not reported as running"
     );
     assert!(!client.state()["capture"].is_null());
+}
+
+#[test]
+fn a_capture_can_ask_the_phone_to_stay_awake() {
+    let (f, mut client) = ready();
+
+    client.request_with("start", json!({"stay_awake": true}));
+    let state = client.await_state("the capture to be running", running);
+    assert_eq!(state["capture"]["stay_awake"], json!(true));
+
+    // scrcpy owns the setting and puts it back itself, even when killed, so
+    // the only thing to assert is that it was asked. It refuses the flag while
+    // control is disabled, which is why --no-control goes with it.
+    let call = &f.await_argv("scrcpy", 1)[0];
+    assert!(call.contains("--stay-awake"), "{call}");
+    assert!(!call.contains("--no-control"), "{call}");
+}
+
+#[test]
+fn a_capture_that_never_asked_keeps_control_off() {
+    let (f, mut client) = ready();
+
+    client.request("start");
+    client.await_state("the capture to be running", running);
+
+    assert_eq!(client.state()["capture"]["stay_awake"], json!(false));
+    let call = &f.await_argv("scrcpy", 1)[0];
+    assert!(call.contains("--no-control"), "{call}");
+    assert!(!call.contains("--stay-awake"), "{call}");
+}
+
+#[test]
+fn a_failed_start_offers_the_tips_only_the_person_holding_the_phone_can_act_on() {
+    let f = Fixture::start();
+    f.script_exit("scrcpy", 2);
+    f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
+    let mut client = f.connect();
+    client.await_state("the phone to connect", |state| {
+        state["connection"]["state"] == json!("connected")
+    });
+
+    let out = f.cli(&["start"]);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("holding the camera"), "{stderr}");
+    assert!(stderr.contains("--stay-awake"), "{stderr}");
 }

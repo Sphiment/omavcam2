@@ -1,5 +1,10 @@
 # Uncropped frames never reach the public virtual camera
 
+> **Mechanism settled by ADR-0010, ADR-0012 and ADR-0013.** Two nodes are
+> packaged: public `omavcam` and `omavcam studio`. The public writer stops while
+> Studio owns the phone; an already-open consumer survives and holds its last
+> decoded frame. scrcpy writes the uncropped feed only to the Studio node.
+
 **Invariant: whatever a crop hides must never be visible to an application
 consuming the virtual camera, at any moment, including while Studio is open.**
 
@@ -27,20 +32,18 @@ The uncropped capture needs a destination that is not the public node, and the
 public node needs to keep satisfying its consumer while that happens — an
 application that loses the device mid-call does not quietly get it back.
 
-The leading design is **two nodes**: a public one that applications see, and a
-Studio one they are never told about, with the public node holding a frame while
-Studio has the phone. Since ADR-0008 moved module configuration to install time,
-the node count is a packaging decision and must be made before the daemon is
-written, not after.
+The design is **two nodes**: a public one applications consume, and a Studio one
+used only for the uncropped preview. Since ADR-0008 moved module configuration
+to install time, both are created and labelled by the package.
 
-**This is not settled, because the mechanism it depends on is unverified.**
-v4l2loopback's `timeout_image` shows a *timeout picture, a null frame by
-default* — not the last real frame — so holding the last frame requires
-something to capture and write it. Whether that works, whether a second writer
-can hold a node open, and whether consumers survive it are hardware questions.
-See the pipeline spike ticket; this ADR fixes the invariant, not the
-implementation.
+The #17 spike established that an open consumer survives the public writer's
+death without being evicted. Most applications keep showing their last decoded
+frame; `timeout` can keep frames arriving for consumers that dislike a stall.
+The public node therefore needs no second writer while Studio has the phone.
 
-A weaker rule — stop the public capture entirely while Studio is open — also
-satisfies the invariant and is the fallback if holding a frame proves
-impractical. It costs the consumer losing the device, which is worse but honest.
+ADR-0012 establishes the discoverability cost plainly: an internal V4L2 node
+cannot stay hidden while a producer is attached. The Studio node is absent from
+camera lists while idle and appears, under an honest internal-purpose label,
+while Studio is open. Any requirement that it never appear while active would
+contradict the measured V4L2 capability behaviour and needs a different
+transport, not another node flag.

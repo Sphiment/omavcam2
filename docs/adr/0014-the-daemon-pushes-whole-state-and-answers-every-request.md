@@ -48,6 +48,12 @@ Every message carries `v`. A client speaking another version is rejected with
 `unsupported_version` rather than silently misreading a field that changed
 meaning — the failure mode a version field exists to prevent.
 
+Version 2 is the first shape with the connection machine and typed capture
+state. Version 1 reserved a `phone: null` field and was changed incompatibly
+when that became `connection`; bumping here makes the promised failure explicit
+before separately installed QML clients exist. Clients validate the daemon's
+version as well as the daemon validating theirs.
+
 Requests are bounded at 64 KiB, enforced while reading rather than after, so a
 malformed or hostile client cannot make the daemon allocate without limit.
 
@@ -56,6 +62,12 @@ malformed or hostile client cannot make the daemon allocate without limit.
 Clients are dumb: connect, read state, render. Every surface — CLI, bar widget,
 Studio — renders the same object, and no surface has resync logic in it.
 
-The daemon writes to clients while holding the state lock, so a client that
-stops reading stalls it. Acceptable at three clients; a per-client queue is the
-upgrade if it ever bites.
+Client sockets are read on separate threads, but every state-changing operation
+passes through one transition turnstile. This is part of the request semantics:
+two callers selecting different phones or racing start against stop must be
+ordered, not both told that their incompatible effects succeeded.
+
+The daemon writes to clients while holding the state lock so revisions cannot
+arrive out of order. Each socket has a one-second write timeout: a client that
+stops reading is dropped instead of freezing every transition. A per-client
+queue remains the upgrade if state volume ever makes that timeout visible.

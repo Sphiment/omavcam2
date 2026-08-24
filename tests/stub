@@ -10,15 +10,29 @@
 #                        "released <tool>" is logged once it goes
 tool=${0##*/}
 printf '%s\n' "$tool $*" >>"$OMAVCAM_STUB_LOG"
-[ -f "$OMAVCAM_STUB_DIR/$tool.out" ] && cat "$OMAVCAM_STUB_DIR/$tool.out"
+command=$1
+[ "$tool" = adb ] && [ "$1" = -s ] && command=$3
+specific="$OMAVCAM_STUB_DIR/$tool.$command"
+[ -f "$specific.out" ] && cat "$specific.out"
+[ ! -f "$specific.out" ] && [ -f "$OMAVCAM_STUB_DIR/$tool.out" ] && cat "$OMAVCAM_STUB_DIR/$tool.out"
+if [ "$tool" = v4l2-ctl ] && [ -f "$OMAVCAM_STUB_DIR/capture.pid" ]; then
+  capture_pid=$(cat "$OMAVCAM_STUB_DIR/capture.pid")
+  kill -0 "$capture_pid" 2>/dev/null && printf 'Video Capture\n'
+fi
 # A held stub is a process that keeps running — a capture that is still going.
 # Removing the hold is that process dying without being asked to, and the log
 # line is how a test knows it has actually gone.
 if [ -f "$OMAVCAM_STUB_DIR/$tool.hold" ]; then
+  if [ "$tool" = scrcpy ]; then
+    printf '%s\n' "$$" >"$OMAVCAM_STUB_DIR/capture.pid"
+    trap 'rm -f "$OMAVCAM_STUB_DIR/capture.pid"' EXIT
+  fi
   while [ -f "$OMAVCAM_STUB_DIR/$tool.hold" ]; do sleep 0.05; done
   printf 'released %s\n' "$tool" >>"$OMAVCAM_STUB_LOG"
 fi
-if [ -f "$OMAVCAM_STUB_DIR/$tool.code" ]; then
+if [ -f "$specific.code" ]; then
+  exit "$(cat "$specific.code")"
+elif [ -f "$OMAVCAM_STUB_DIR/$tool.code" ]; then
   exit "$(cat "$OMAVCAM_STUB_DIR/$tool.code")"
 fi
 exit 0

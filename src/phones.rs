@@ -4,12 +4,15 @@
 //! never guesses: the second phone on the desk is usually charging, not waiting
 //! to be a webcam.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
+use crate::command;
 use crate::protocol::{Connection, Phone};
 
 /// One line of `adb devices -l`: the serial, adb's own word for its state, and
@@ -23,11 +26,17 @@ pub struct Attached {
 
 /// The phones adb can see right now. This and `adb start-server` are the only
 /// adb calls with no phone to name; every other one is targeted with `-s`.
-pub fn scan() -> Vec<Attached> {
-    match Command::new("adb").args(["devices", "-l"]).output() {
-        Ok(out) => parse(&String::from_utf8_lossy(&out.stdout)),
-        Err(_) => Vec::new(),
+pub fn scan() -> std::io::Result<Vec<Attached>> {
+    let mut process = Command::new("adb");
+    process.args(["devices", "-l"]);
+    let out = command::output(process)?;
+    if !out.status.success() {
+        return Err(std::io::Error::other(format!(
+            "adb devices failed with {}",
+            out.status
+        )));
     }
+    Ok(parse(&String::from_utf8_lossy(&out.stdout)))
 }
 
 /// Ask the selected phone directly whether it is there. This is the step that
@@ -35,8 +44,10 @@ pub fn scan() -> Vec<Attached> {
 /// project: its answer is the exit status, not the output, so it stays honest
 /// even when adb has something chatty to say.
 pub fn connect(serial: &str) -> bool {
+    let mut process = Command::new("adb");
+    process.args(["-s", serial, "get-state"]);
     matches!(
-        Command::new("adb").args(["-s", serial, "get-state"]).status(),
+        command::status(process),
         Ok(status) if status.success()
     )
 }
@@ -121,6 +132,7 @@ impl From<&Attached> for Phone {
 /// What omavcam remembers about phones between runs: today the selected one,
 /// later the phones wireless pairing knows about. One registry, not two.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Registry {
     pub selected: Option<String>,
 }
@@ -129,20 +141,38 @@ fn registry_path(state_dir: &Path) -> PathBuf {
     state_dir.join("phones.json")
 }
 
-/// A missing or unreadable registry is an empty one: the cost is choosing a
-/// phone again, which is not worth refusing to start over.
+/// A missing registry is an empty one. A damaged one is reported before falling
+/// back: refusing to start is excessive, but silently forgetting a phone makes
+/// a persistence failure look like user error.
 pub fn load(state_dir: &Path) -> Registry {
-    fs::read_to_string(registry_path(state_dir))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    let path = registry_path(state_dir);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Registry::default(),
+        Err(e) => {
+            eprintln!("omavcam: could not read {}: {e}", path.display());
+            return Registry::default();
+        }
+    };
+    serde_json::from_str(&text).unwrap_or_else(|e| {
+        eprintln!("omavcam: could not parse {}: {e}", path.display());
+        Registry::default()
+    })
 }
 
 pub fn save(state_dir: &Path, registry: &Registry) -> std::io::Result<()> {
-    fs::write(
-        registry_path(state_dir),
-        serde_json::to_string_pretty(registry)?,
-    )
+    let path = registry_path(state_dir);
+    let temporary = state_dir.join(".phones.json.tmp");
+    let text = serde_json::to_vec_pretty(registry)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    file.write_all(&text)?;
+    file.sync_all()?;
+    fs::rename(temporary, path)
 }
 
 #[cfg(test)]
@@ -204,5 +234,11 @@ mod tests {
         ));
         // ...and an unauthorised phone is never what gets remembered.
         assert_eq!(resolve(&[attached("a", "unauthorized")], None).1, None);
+    }
+
+    #[test]
+    fn the_registry_accepts_fields_added_after_an_older_file_was_written() {
+        let registry: Registry = serde_json::from_str("{}").unwrap();
+        assert_eq!(registry.selected, None);
     }
 }

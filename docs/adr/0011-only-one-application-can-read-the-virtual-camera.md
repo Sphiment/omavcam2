@@ -1,5 +1,10 @@
 # Only one application can read a camera at a time, and that is not our doing
 
+> **The always-on fan-out decision below was superseded by ADR-0013.** The
+> single-reader measurement remains binding. The floating preview is scrcpy's
+> own window and reads no node; fan-out survives only as ADR-0010's on-demand
+> off-centre crop relay.
+
 A V4L2 camera serves exactly one streaming client. A second one is refused with
 `EBUSY`. This is true of the virtual camera, and equally true of the laptop's
 real webcam.
@@ -96,17 +101,17 @@ the same; a green result without an attribution check means nothing here.
 > draw its own window, cheaper than fanning out and without the extra nodes. The
 > single-reader finding below stands and still governs anything that does read.
 
-## Decided: the daemon fans out to a second node
+## Historical decision: the daemon fans out to a second node
 
 The PipeWire option is **closed**, not merely weak — ADR-0012 explains why. It
 only ever saw omavcam under `exclusive_caps=0`, which is the setting that makes
 browsers hide the camera and makes readers fail at `STREAMON`. No configuration
 satisfies both.
 
-That leaves the fan-out: scrcpy writes to a private node, the daemon reads it
-once, and writes to the public camera and to a preview node. Each node then has
-exactly one writer and one reader, which is the arrangement that has worked all
-along.
+At this point in the investigation that left fan-out: scrcpy wrote to a private
+node, and the daemon wrote the public camera and a preview node. ADR-0013 later
+removed the premise—the floating preview can use scrcpy's already-decoded
+window—so this is measurement history rather than the normal pipeline.
 
 ### What it costs
 
@@ -137,11 +142,9 @@ do better. The kernel copy is the floor.
 
 ## Consequences
 
-The daemon becomes the writer of the public camera, and scrcpy becomes an
-internal detail feeding it. That is the same shape as OBS's virtual camera, and
-it is more consistent with ADR-0001 than the current arrangement, where scrcpy
-writing directly is the one part of the system the daemon does not own.
+The ordinary capture is direct: scrcpy writes the public camera and draws its
+own optional preview window. The daemon becomes the public writer only for
+ADR-0010's off-centre crop-and-scale path.
 
-Per ADR-0012 the internal nodes cannot be hidden: while the fan-out is live they
-appear in every application's camera list. Name them so that is not confusing,
-and only write to them while they are actually in use.
+Per ADR-0012, nodes used by that relay cannot be hidden while active. Name them
+so that is not confusing, and write to them only while actually in use.

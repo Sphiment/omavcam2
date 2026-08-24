@@ -1,13 +1,13 @@
 # Crop happens on the phone, and Studio previews uncropped
 
-> **Superseded in part by ADR-0010.** Everything below about *where* cropping
-> happens still holds. What it missed is that `--crop` changes the virtual
-> camera's frame size, which permanently freezes any application already
-> watching. Framing is therefore `--camera-zoom`, which does not change the
-> size; off-centre crop survives as a restricted operation. Read ADR-0010 first.
+> **Superseded in part by ADR-0010.** Phone-side `--crop` remains the cheapest
+> fixed off-centre path and the measurements below still stand. What this ADR
+> missed is that crop changes the virtual camera's frame size. Live off-centre
+> framing therefore uses an on-demand host crop *and scale back to the public
+> size*; centred framing uses `--camera-zoom`. Read ADR-0010 first.
 
-Cropping is applied by `scrcpy --crop` on the device, before encoding. Host-side
-cropping is not offered.
+Phone-side cropping is applied by `scrcpy --crop` before encoding. Host-side
+crop and scale is also offered when live adjustment is required.
 
 ## Why
 
@@ -24,9 +24,10 @@ Measured, both producing identical 640x360 output:
 | On the laptop (scrcpy → fifo → ffmpeg → v4l2) | 25.4% | full 1280x720 |
 
 Host-side costs roughly twice the CPU, sends the full frame across the cable to
-throw half of it away, and puts ffmpeg and a fifo in the pipeline. Its only
-advantage is adjustment without restarting the capture — worth nothing here,
-because settings are applied in a batch anyway.
+throw half of it away, and puts another stage in the pipeline. Its advantage is
+adjustment without restarting the capture. ADR-0010 later established that this
+matters mid-call because a size-changing restart freezes an attached consumer,
+so the cost is now paid on demand rather than rejected.
 
 ## Studio must preview the uncropped frame
 
@@ -46,8 +47,8 @@ the crop is applied on the phone, the uncropped pixels never cross the cable, so
 
 ## Consequences
 
-Every setting scrcpy fixes at launch — lens, resolution, frame rate, crop —
-requires replacing the capture, during which the virtual camera disappears and
-returns. Applications usually reacquire it, but it is a visible blip. Studio
-therefore batches changes behind an Apply button: one blip per session rather
-than one per adjustment.
+Every setting scrcpy fixes at launch requires replacing that direct capture.
+Studio batches those changes behind Apply. The host relay is the exception: its
+crop rectangle is a live variable and its output is scaled back to the fixed
+public size, so changing it neither restarts scrcpy nor changes the public
+format.

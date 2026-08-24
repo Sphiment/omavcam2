@@ -3,17 +3,17 @@
 //! Two message types travel from the daemon to a client:
 //!
 //! ```text
-//! {"type":"state","v":1,"rev":4,"state":{...}}
-//! {"type":"response","v":1,"id":"7","rev":4,"ok":true}
-//! {"type":"response","v":1,"id":"7","rev":4,"ok":false,"error":{"code":"...","message":"..."}}
+//! {"type":"state","v":2,"rev":4,"state":{...}}
+//! {"type":"response","v":2,"id":"7","rev":4,"ok":true}
+//! {"type":"response","v":2,"id":"7","rev":4,"ok":false,"error":{"code":"...","message":"..."}}
 //! ```
 //!
 //! and one from a client to the daemon:
 //!
 //! ```text
-//! {"v":1,"id":"7","kind":"status"}
-//! {"v":1,"id":"8","kind":"select","serial":"39281FDJH0031T"}
-//! {"v":1,"id":"9","kind":"start"}
+//! {"v":2,"id":"7","kind":"status"}
+//! {"v":2,"id":"8","kind":"select","serial":"39281FDJH0031T"}
+//! {"v":2,"id":"9","kind":"start"}
 //! ```
 //!
 //! The daemon pushes the *whole* state, unprompted, to every connected client
@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 
 /// Bumped whenever the shape below changes incompatibly. A client sending
 /// anything else is rejected with an error rather than misparsed.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Longest accepted request line, newline included. A client cannot make the
 /// daemon allocate past this.
@@ -36,7 +36,7 @@ pub const MAX_MESSAGE: usize = 64 * 1024;
 /// that reconnects after a daemon restart is correct immediately.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct State {
-    /// Whether `adb start-server` last succeeded.
+    /// Whether the latest adb server probe or device scan succeeded.
     pub adb_ok: bool,
     pub connection: Connection,
     /// The running capture, or nothing. There is no third state: a capture
@@ -54,6 +54,9 @@ pub struct Capture {
     /// The frame size, fixed for this capture's lifetime: a restart at another
     /// size freezes whatever is watching (ADR-0010).
     pub size: String,
+    /// Whether this capture asked the phone to stay awake while plugged in,
+    /// which also says whether stopping has a setting to put back.
+    pub stay_awake: bool,
 }
 
 /// One Android device, identified by the serial adb reports, under a name a

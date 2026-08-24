@@ -5,6 +5,7 @@ mod common;
 
 use common::Fixture;
 use serde_json::json;
+use std::time::{Duration, Instant};
 
 /// A phone that is used, and one charging off the same laptop.
 const PIXEL: &str = "39281FDJH0031T";
@@ -174,6 +175,20 @@ fn unplugging_the_phone_returns_to_no_phone() {
 }
 
 #[test]
+fn an_offline_phone_is_not_left_connected() {
+    let f = Fixture::start();
+    let mut client = f.connect();
+    f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
+    client.await_state("the phone to connect", is("connected"));
+
+    f.script_devices(&[(PIXEL, "offline", Some("Pixel_7"))]);
+    f.script_exit_for("adb", "get-state", 1);
+    client.request("refresh");
+
+    assert_eq!(client.state()["connection"]["state"], json!("connecting"));
+}
+
+#[test]
 fn every_adb_call_that_addresses_a_phone_names_its_serial() {
     let f = Fixture::start();
     let mut client = f.connect();
@@ -216,6 +231,25 @@ fn selecting_a_phone_that_is_not_attached_is_a_clear_error() {
             .contains(PIXEL),
         "the error says what is attached: {response}"
     );
+}
+
+#[test]
+fn a_stalled_adb_scan_times_out_instead_of_wedging_the_daemon() {
+    let f = Fixture::slow_poll();
+    let mut client = f.connect();
+    f.script_hold("adb");
+    let started = Instant::now();
+
+    let response = client.request_with("select", json!({"serial": PIXEL}));
+
+    f.script_release("adb");
+    assert_eq!(response["ok"], json!(false), "{response}");
+    assert_eq!(response["error"]["code"], json!("adb_unavailable"));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the command deadline did not bound the request"
+    );
+    assert_eq!(client.request("status")["ok"], json!(true));
 }
 
 #[test]

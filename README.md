@@ -98,6 +98,10 @@ without being asked. That holds even when the other phone is the only one on
 the desk, so a phone you have never used before is one `omavcam select` away —
 run it bare and it lists what is attached.
 
+Changing the selected phone stops a running capture first. A capture is bound
+to the phone it was launched against; changing the status label while leaving
+the old phone on camera would be both misleading and a privacy failure.
+
 Every `adb` call that addresses a phone names it with `-s <serial>`. The only
 two that do not are `start-server` and `devices`, which have no phone to name.
 A test asserts this over the recorded argv, because an untargeted command is
@@ -128,6 +132,11 @@ different size would freeze it permanently and silently, which is why the size
 is fixed for a capture's lifetime and why there is no resolution setting yet
 (ADR-0010).
 
+The daemon leaves `keep_format=0`: an application already reading the camera
+pins the format by itself, while an idle node must remain free to accept the
+size changes ticket #9 allows. `sustain_framerate` and `timeout` keep consumers
+that dislike stalled input attached across a same-size restart.
+
 ## How the pieces talk
 
 Line-delimited JSON over a unix socket in the runtime dir. The daemon pushes the
@@ -138,6 +147,8 @@ correct immediately with no resync request.
 Alongside that, every request carries an id which its response echoes, plus an
 explicit success or machine-readable error — that is where the CLI's exit codes
 come from. Messages carry a protocol version, and requests are bounded at 64 KiB.
+External commands have a ten-second deadline, so a wedged adb cannot freeze the
+connection machine or every client behind it.
 
 The full shape is documented at the top of [`src/protocol.rs`](src/protocol.rs),
 and the reasoning is in
@@ -169,6 +180,7 @@ installing anything.
 
 ```
 src/protocol.rs   the wire format, shared by the daemon and the CLI
+src/command.rs    concrete subprocess deadlines; PATH remains the test seam
 src/daemon.rs     the daemon: state, clients, pushing
 src/phones.rs     what adb sees, which phone is selected, what that means
 src/capture.rs    finding the virtual camera, and launching scrcpy at it

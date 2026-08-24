@@ -3,22 +3,23 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, Command};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::capture;
 use crate::phones::{self, Registry};
 use crate::protocol::{
     error_message, ok_message, socket_path, state_message, Capture, Connection, State, MAX_MESSAGE,
     VERSION,
 };
+use crate::{capture, command};
 
 /// How often the daemon asks adb what is attached. adb has no way to tell us —
 /// this one cannot discover devices at all (ADR-0006) — so it is asked.
@@ -51,12 +52,23 @@ struct Daemon {
 
 type Shared = Arc<Mutex<Daemon>>;
 
+/// Every state-changing operation passes through one turnstile. Client threads
+/// still read independently, but two panels cannot race `start` against `stop`
+/// or select two different phones and both receive a successful answer.
+static TRANSITION: Mutex<()> = Mutex::new(());
+
+fn transition() -> MutexGuard<'static, ()> {
+    TRANSITION.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// Make this the state and push the whole thing to everyone. Returns the
 /// revision it is now at — unchanged if the state was already this, so the
 /// revision counts changes rather than requests.
 ///
-// ponytail: writes happen under the state lock, so one wedged client stalls
-// the daemon. A per-client queue thread if that ever bites.
+// Writes happen under the state lock so revisions stay ordered. Each client has
+// a bounded write timeout; per-client queues are the upgrade if volume grows.
 fn publish(shared: &Shared, state: State) -> u64 {
     let mut inner = shared.lock().unwrap();
     if inner.state == state {
@@ -85,23 +97,32 @@ fn write_line(client: &Arc<Mutex<UnixStream>>, msg: &str) -> std::io::Result<()>
 }
 
 fn probe_adb() -> bool {
-    matches!(Command::new("adb").arg("start-server").status(), Ok(s) if s.success())
+    let mut process = Command::new("adb");
+    process.arg("start-server");
+    matches!(command::status(process), Ok(status) if status.success())
 }
 
 /// Work out the connection from what adb reports, publish it, and connect to
 /// the selected phone. Called by the poll thread and by requests that should
 /// answer with the state they caused.
 ///
-/// One at a time, so a `select` and a poll landing together do not each
-/// publish their own view of the desk. Poisoning is ignored deliberately: this
-/// serialises work, and a panic in one pass is no reason for phone handling to
-/// stop working for the life of the daemon. One daemon per process, so the
-/// lock can be a static.
-fn refresh_connection(shared: &Shared) {
-    static PASS: Mutex<()> = Mutex::new(());
-    let _turn = PASS.lock().unwrap_or_else(PoisonError::into_inner);
-
-    let attached = phones::scan();
+/// Callers hold the transition lock, so a scan and the state derived from it
+/// cannot interleave with a selection or capture lifecycle operation. Returns
+/// whether adb answered successfully.
+fn refresh_connection_locked(shared: &Shared) -> bool {
+    let attached = match phones::scan() {
+        Ok(attached) => attached,
+        Err(e) => {
+            eprintln!("omavcam: could not scan phones: {e}");
+            let state = State {
+                adb_ok: false,
+                connection: Connection::NoPhone,
+                ..shared.lock().unwrap().state.clone()
+            };
+            publish(shared, state);
+            return false;
+        }
+    };
     let (connection, remember) = {
         let inner = shared.lock().unwrap();
         phones::resolve(&attached, inner.registry.selected.as_deref())
@@ -110,11 +131,15 @@ fn refresh_connection(shared: &Shared) {
         remember_selection(shared, serial);
     }
 
-    // A phone already connected and still attached is not asked again; the
-    // scan said everything there is to know.
+    // A phone already connected and still reported as usable is not asked
+    // again. `offline` devices remain listed by adb, so identity alone is not
+    // enough to preserve Connected.
     let connection = match (&connection, &shared.lock().unwrap().state.connection) {
         (Connection::Connecting { phone }, Connection::Connected { phone: same })
-            if phone == same =>
+            if phone == same
+                && attached
+                    .iter()
+                    .any(|item| item.serial == phone.serial && item.adb_state == "device") =>
         {
             Connection::Connected {
                 phone: phone.clone(),
@@ -131,10 +156,12 @@ fn refresh_connection(shared: &Shared) {
         // If it did not answer we stay in Connecting and the next pass tries
         // again — a phone that is booting or half-asleep needs no error.
     }
+    true
 }
 
 fn publish_connection(shared: &Shared, connection: Connection) {
     let state = State {
+        adb_ok: true,
         connection,
         ..shared.lock().unwrap().state.clone()
     };
@@ -151,11 +178,14 @@ fn publish_capture(shared: &Shared, capture: Option<Capture>) {
 
 /// Launch a capture against the connected phone. Returns the error code and
 /// message for a client, or nothing when it started.
-fn start_capture(shared: &Shared) -> Result<(), (&'static str, String)> {
+fn start_capture(shared: &Shared, stay_awake: bool) -> Result<(), (&'static str, String)> {
+    let _turn = transition();
     // Answer from what is true now, not from whatever the last poll saw: the
     // phone may have gone, and the capture may already have died with it.
-    refresh_connection(shared);
-    reap_capture(shared);
+    if !refresh_connection_locked(shared) {
+        return Err(("adb_unavailable", "adb devices failed".to_string()));
+    }
+    reap_capture_locked(shared);
     if shared.lock().unwrap().capture.is_some() {
         return Ok(());
     }
@@ -169,7 +199,7 @@ fn start_capture(shared: &Shared) -> Result<(), (&'static str, String)> {
     let node = capture::find_node().map_err(|e| ("no_virtual_camera", e))?;
     capture::set_controls(&node);
 
-    match capture::spawn(&phone.serial, &node) {
+    match capture::spawn(&phone.serial, &node, stay_awake) {
         Ok(child) => {
             shared.lock().unwrap().capture = Some(child);
             publish_capture(
@@ -178,14 +208,16 @@ fn start_capture(shared: &Shared) -> Result<(), (&'static str, String)> {
                     phone,
                     node,
                     size: capture::SIZE.to_string(),
+                    stay_awake,
                 }),
             );
             Ok(())
         }
-        Err(e) => Err((
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err((
             "capture_failed",
-            format!("could not launch scrcpy: {e}; is it installed?"),
+            format!("could not launch scrcpy: {e}; install scrcpy and try again"),
         )),
+        Err(e) => Err(("capture_failed", format!("scrcpy did not start: {e}"))),
     }
 }
 
@@ -210,7 +242,13 @@ fn refusal_reason(connection: &Connection) -> String {
 /// End the capture. Stopping one that is not running is a no-op: the switch
 /// reads off either way.
 fn stop_capture(shared: &Shared) {
-    if let Some(mut child) = shared.lock().unwrap().capture.take() {
+    let _turn = transition();
+    stop_capture_locked(shared);
+}
+
+fn stop_capture_locked(shared: &Shared) {
+    let child = { shared.lock().unwrap().capture.take() };
+    if let Some(mut child) = child {
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -219,7 +257,7 @@ fn stop_capture(shared: &Shared) {
 
 /// scrcpy dying on its own — the phone unplugged, the process killed — must
 /// leave a switch that says off rather than one that claims to be on.
-fn reap_capture(shared: &Shared) {
+fn reap_capture_locked(shared: &Shared) {
     let exited = {
         let mut inner = shared.lock().unwrap();
         match inner.capture.as_mut().map(Child::try_wait) {
@@ -237,15 +275,69 @@ fn reap_capture(shared: &Shared) {
 
 /// Remember which phone is in use, so choosing is a one-time act.
 fn remember_selection(shared: &Shared, serial: String) {
-    let mut inner = shared.lock().unwrap();
-    if inner.registry.selected.as_deref() == Some(serial.as_str()) {
-        return;
-    }
-    inner.registry.selected = Some(serial);
-    if let Err(e) = phones::save(&inner.state_dir, &inner.registry) {
+    let (state_dir, registry) = {
+        let mut inner = shared.lock().unwrap();
+        if inner.registry.selected.as_deref() == Some(serial.as_str()) {
+            return;
+        }
+        inner.registry.selected = Some(serial);
+        (inner.state_dir.clone(), inner.registry.clone())
+    };
+    if let Err(e) = phones::save(&state_dir, &registry) {
         // Worth continuing: the selection holds until the daemon restarts.
         eprintln!("omavcam: could not remember the selected phone: {e}");
     }
+}
+
+fn refresh_adb(shared: &Shared) -> bool {
+    let _turn = transition();
+    if !probe_adb() {
+        let state = State {
+            adb_ok: false,
+            connection: Connection::NoPhone,
+            ..shared.lock().unwrap().state.clone()
+        };
+        publish(shared, state);
+        return false;
+    }
+    refresh_connection_locked(shared)
+}
+
+fn select_phone(shared: &Shared, serial: &str) -> Result<(), (&'static str, String)> {
+    let _turn = transition();
+    let attached = phones::scan().map_err(|e| ("adb_unavailable", e.to_string()))?;
+    if !attached.iter().any(|phone| phone.serial == serial) {
+        // Say what *is* attached: the caller cannot always see it. A remembered
+        // phone that is unplugged reports `NoPhone`, so this error is also how
+        // someone finds the serial of another phone on the desk.
+        let serials: Vec<&str> = attached.iter().map(|phone| phone.serial.as_str()).collect();
+        let known = match serials.is_empty() {
+            true => "none".to_string(),
+            false => serials.join(", "),
+        };
+        let message = match serial.is_empty() {
+            true => format!("name a phone; attached: {known}"),
+            false => format!("no phone {serial:?} is attached; attached: {known}"),
+        };
+        return Err(("no_such_phone", message));
+    }
+
+    let capture_phone = shared
+        .lock()
+        .unwrap()
+        .state
+        .capture
+        .as_ref()
+        .map(|capture| capture.phone.serial.clone());
+    if capture_phone
+        .as_deref()
+        .is_some_and(|running| running != serial)
+    {
+        stop_capture_locked(shared);
+    }
+    remember_selection(shared, serial.to_string());
+    refresh_connection_locked(shared);
+    Ok(())
 }
 
 /// Systemd hands the listening socket in on fd 3 when it activates us;
@@ -257,8 +349,19 @@ fn listener() -> std::io::Result<UnixListener> {
         return Ok(unsafe { UnixListener::from_raw_fd(3) });
     }
     let path = socket_path();
-    let _ = fs::remove_file(&path);
-    UnixListener::bind(path)
+    let listener = match UnixListener::bind(&path) {
+        Ok(listener) => listener,
+        Err(bind_error) if bind_error.kind() == std::io::ErrorKind::AddrInUse => {
+            if UnixStream::connect(&path).is_ok() {
+                return Err(bind_error);
+            }
+            fs::remove_file(&path)?;
+            UnixListener::bind(&path)?
+        }
+        Err(e) => return Err(e),
+    };
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
 }
 
 fn state_dir() -> PathBuf {
@@ -275,10 +378,11 @@ pub fn run() -> std::io::Result<()> {
     let dir = state_dir();
     fs::create_dir_all(&dir)?;
     let listener = listener()?;
+    let adb_ok = probe_adb();
     let shared: Shared = Arc::new(Mutex::new(Daemon {
         rev: 1,
         state: State {
-            adb_ok: probe_adb(),
+            adb_ok,
             ..Default::default()
         },
         clients: HashMap::new(),
@@ -287,6 +391,12 @@ pub fn run() -> std::io::Result<()> {
         state_dir: dir.clone(),
         capture: None,
     }));
+    // The first client, especially the one that socket-activated us, must not
+    // observe a placeholder NoPhone state and exit before the watcher runs.
+    if adb_ok {
+        let _turn = transition();
+        refresh_connection_locked(&shared);
+    }
     eprintln!("omavcam: listening, state dir {}", dir.display());
 
     // The world changes without anyone asking: a phone is plugged in, or
@@ -295,8 +405,11 @@ pub fn run() -> std::io::Result<()> {
     // running a thread of its own for one `try_wait`.
     let watcher = Arc::clone(&shared);
     thread::spawn(move || loop {
-        refresh_connection(&watcher);
-        reap_capture(&watcher);
+        {
+            let _turn = transition();
+            refresh_connection_locked(&watcher);
+            reap_capture_locked(&watcher);
+        }
         thread::sleep(poll_interval());
     });
 
@@ -313,6 +426,7 @@ pub fn run() -> std::io::Result<()> {
 }
 
 fn serve(shared: &Shared, stream: UnixStream) -> std::io::Result<()> {
+    stream.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT))?;
     let reader = BufReader::new(stream.try_clone()?);
     let client = Arc::new(Mutex::new(stream));
 
@@ -352,17 +466,18 @@ fn read_requests(
         if n == 0 {
             return Ok(());
         }
+        if line.len() > MAX_MESSAGE {
+            let rev = shared.lock().unwrap().rev;
+            let msg = error_message(
+                &Value::Null,
+                rev,
+                "message_too_large",
+                &format!("request exceeds {MAX_MESSAGE} bytes"),
+            );
+            let _ = write_line(client, &msg);
+            return Ok(());
+        }
         if !line.ends_with(b"\n") {
-            if line.len() > MAX_MESSAGE {
-                let rev = shared.lock().unwrap().rev;
-                let msg = error_message(
-                    &Value::Null,
-                    rev,
-                    "message_too_large",
-                    &format!("request exceeds {MAX_MESSAGE} bytes"),
-                );
-                let _ = write_line(client, &msg);
-            }
             return Ok(());
         }
         let response = handle(shared, &line);
@@ -404,13 +519,7 @@ fn handle(shared: &Shared, line: &[u8]) -> String {
     match request.get("kind").and_then(Value::as_str) {
         Some("status") => ok_message(&id, current_rev()),
         Some("refresh") => {
-            let adb_ok = probe_adb();
-            let state = State {
-                adb_ok,
-                ..shared.lock().unwrap().state.clone()
-            };
-            publish(shared, state);
-            refresh_connection(shared);
+            let adb_ok = refresh_adb(shared);
             if adb_ok {
                 ok_message(&id, current_rev())
             } else {
@@ -424,29 +533,18 @@ fn handle(shared: &Shared, line: &[u8]) -> String {
         }
         Some("select") => {
             let serial = request.get("serial").and_then(Value::as_str).unwrap_or("");
-            let attached = phones::scan();
-            if !attached.iter().any(|a| a.serial == serial) {
-                // Say what *is* attached: the caller cannot always see it. A
-                // remembered phone that is unplugged reports `NoPhone` rather
-                // than offering whatever else is on the desk, so this error is
-                // how someone finds the serial of the other one.
-                let serials: Vec<&str> = attached.iter().map(|a| a.serial.as_str()).collect();
-                let known = match serials.is_empty() {
-                    true => "none".to_string(),
-                    false => serials.join(", "),
-                };
-                let message = match serial.is_empty() {
-                    true => format!("name a phone; attached: {known}"),
-                    false => format!("no phone {serial:?} is attached; attached: {known}"),
-                };
-                return error_message(&id, current_rev(), "no_such_phone", &message);
+            match select_phone(shared, serial) {
+                Ok(()) => ok_message(&id, current_rev()),
+                Err((code, message)) => error_message(&id, current_rev(), code, &message),
             }
-            remember_selection(shared, serial.to_string());
-            // Answer with the state the choice produced, not the one before it.
-            refresh_connection(shared);
-            ok_message(&id, current_rev())
         }
-        Some("start") => match start_capture(shared) {
+        Some("start") => match start_capture(
+            shared,
+            request
+                .get("stay_awake")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        ) {
             Ok(()) => ok_message(&id, current_rev()),
             Err((code, message)) => error_message(&id, current_rev(), code, &message),
         },

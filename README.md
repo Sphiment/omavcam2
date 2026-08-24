@@ -100,8 +100,15 @@ No AUR helper, or working on omavcam:
 ```sh
 git clone https://github.com/Sphiment/omavcam2.git
 cd omavcam2
-cargo build --release              # needs rustup: pacman -S rustup && rustup default stable
-makepkg -si -p packaging/PKGBUILD  # or install the pieces by hand, as below
+cargo build --release   # needs rustup: pacman -S rustup && rustup default stable
+```
+
+Or build the package itself. makepkg insists on being run from the directory
+its PKGBUILD is in, and it clones the repo from GitHub rather than packaging
+your working tree:
+
+```sh
+cd packaging && makepkg -si
 ```
 
 By hand, which is the same set of files without pacman knowing about them:

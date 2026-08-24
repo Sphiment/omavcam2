@@ -8,3 +8,10 @@
 
 # Vendored third-party agent skills, restored from skills-lock.json.
 /.agents/skills/
+
+# makepkg's workspace, when the package is built from packaging/ in place.
+packaging/src/
+packaging/pkg/
+packaging/omavcam-git/
+packaging/*.pkg.tar.*
+packaging/*.log

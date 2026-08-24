@@ -14,7 +14,7 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 
 use crate::command;
-use crate::protocol::{Connection, Phone};
+use crate::protocol::{Connection, KnownPhone, PairingFailure, Phone};
 use crate::settings::CameraSettings;
 
 /// One line of `adb devices -l`: the serial, adb's own word for its state, and
@@ -58,6 +58,84 @@ pub fn connect(serial: &str) -> bool {
         command::status(process),
         Ok(status) if status.success()
     )
+}
+
+pub fn valid_endpoint(endpoint: &str) -> bool {
+    endpoint.rsplit_once(':').is_some_and(|(host, port)| {
+        !host.is_empty()
+            && !host.chars().any(char::is_whitespace)
+            && port.parse::<u16>().is_ok_and(|port| port != 0)
+    })
+}
+
+pub fn pair(address: &str, code: &str) -> Result<(), PairingFailure> {
+    if !valid_endpoint(address) {
+        return Err(PairingFailure::WrongAddress);
+    }
+    if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(PairingFailure::WrongCode);
+    }
+    let mut process = Command::new("adb");
+    process.args(["pair", address, code]);
+    let output = command::output(process).map_err(|_| PairingFailure::Unreachable)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let words = format!(
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .to_lowercase();
+    if words.contains("wrong password") || words.contains("pairing code") {
+        Err(PairingFailure::WrongCode)
+    } else if [
+        "unknown host",
+        "bad port",
+        "invalid address",
+        "name or service",
+    ]
+    .iter()
+    .any(|needle| words.contains(needle))
+    {
+        Err(PairingFailure::WrongAddress)
+    } else {
+        Err(PairingFailure::Unreachable)
+    }
+}
+
+pub fn connect_wireless(address: &str) -> bool {
+    if !valid_endpoint(address) {
+        return false;
+    }
+    let mut process = Command::new("adb");
+    process.args(["connect", address]);
+    command::output(process).is_ok_and(|output| {
+        let words = format!(
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .to_lowercase();
+        output.status.success()
+            && !["failed", "unable", "cannot"]
+                .iter()
+                .any(|needle| words.contains(needle))
+    })
+}
+
+pub fn disconnect_wireless(address: &str) {
+    let mut process = Command::new("adb");
+    process.args(["disconnect", address]);
+    let _ = command::status(process);
+}
+
+pub fn stable_id(serial: &str) -> Option<String> {
+    let mut process = Command::new("adb");
+    process.args(["-s", serial, "shell", "getprop", "ro.serialno"]);
+    let output = command::output(process).ok()?;
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (output.status.success() && !id.is_empty()).then_some(id)
 }
 
 fn parse(output: &str) -> Vec<Attached> {
@@ -149,13 +227,14 @@ impl From<&Attached> for crate::protocol::Attached {
     }
 }
 
-/// What omavcam remembers about phones between runs: today the selected one,
-/// later the phones wireless pairing knows about. One registry, not two.
+/// What omavcam remembers about phones between runs: the selected one and the
+/// phones wireless pairing knows about. One registry, not two.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Registry {
     pub selected: Option<String>,
     pub settings: BTreeMap<String, CameraSettings>,
+    pub phones: Vec<KnownPhone>,
 }
 
 fn registry_path(state_dir: &Path) -> PathBuf {

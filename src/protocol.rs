@@ -3,19 +3,19 @@
 //! Two message types travel from the daemon to a client:
 //!
 //! ```text
-//! {"type":"state","v":2,"rev":4,"state":{...}}
-//! {"type":"response","v":2,"id":"7","rev":4,"ok":true}
-//! {"type":"response","v":2,"id":"7","rev":4,"ok":false,"error":{"code":"...","message":"..."}}
+//! {"type":"state","v":3,"rev":4,"state":{...}}
+//! {"type":"response","v":3,"id":"7","rev":4,"ok":true}
+//! {"type":"response","v":3,"id":"7","rev":4,"ok":false,"error":{"code":"...","message":"..."}}
 //! ```
 //!
 //! and one from a client to the daemon:
 //!
 //! ```text
-//! {"v":2,"id":"7","kind":"status"}
-//! {"v":2,"id":"8","kind":"select","serial":"39281FDJH0031T"}
-//! {"v":2,"id":"9","kind":"start"}
-//! {"v":2,"id":"10","kind":"set","setting":"zoom","value":2}
-//! {"v":2,"id":"11","kind":"apply"}
+//! {"v":3,"id":"7","kind":"status"}
+//! {"v":3,"id":"8","kind":"select","serial":"39281FDJH0031T"}
+//! {"v":3,"id":"9","kind":"start"}
+//! {"v":3,"id":"10","kind":"set","setting":"zoom","value":2}
+//! {"v":3,"id":"11","kind":"apply"}
 //! ```
 //!
 //! The daemon pushes the *whole* state, unprompted, to every connected client
@@ -30,7 +30,7 @@ use crate::settings::SettingsState;
 
 /// Bumped whenever the shape below changes incompatibly. A client sending
 /// anything else is rejected with an error rather than misparsed.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// Longest accepted request line, newline included. A client cannot make the
 /// daemon allocate past this.
@@ -56,6 +56,9 @@ pub struct State {
     /// settings. Absent until a connected phone has answered scrcpy's probe.
     #[serde(default)]
     pub settings: Option<SettingsState>,
+    /// Every phone remembered in the one wired/wireless registry.
+    #[serde(default)]
+    pub known: Vec<KnownPhone>,
 }
 
 /// One phone adb reports, and whether adb will talk to it.
@@ -91,12 +94,38 @@ pub struct Phone {
     pub name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Transport {
+    Wired,
+    Wireless,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnownPhone {
+    /// Durable identity for per-phone settings. Unlike a wireless adb serial,
+    /// this does not change when Android chooses a new connect port.
+    #[serde(default)]
+    pub id: String,
+    pub phone: Phone,
+    pub transport: Transport,
+    /// Wireless debugging's connect endpoint. Pairing uses a separate,
+    /// transient endpoint and is deliberately never persisted here.
+    pub connect_address: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairingFailure {
+    WrongCode,
+    WrongAddress,
+    Unreachable,
+}
+
 /// How far the connection to a phone has got. A phase with its own states and
 /// its own advice, not a precondition that holds or doesn't (ADR-0007).
 ///
-/// The wireless states — `NeedsPairing`, `PairingFailed`, `Unreachable` — and
-/// `Reconnecting` join this enum in later tickets. On the wire each variant is
-/// `{"state":"connected","phone":{...}}`.
+/// On the wire each variant is `{"state":"connected","phone":{...}}`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Connection {
@@ -120,6 +149,14 @@ pub enum Connection {
     },
     Connected {
         phone: Phone,
+    },
+    NeedsPairing,
+    PairingFailed {
+        reason: PairingFailure,
+    },
+    Unreachable {
+        phone: Phone,
+        connect_address: String,
     },
 }
 

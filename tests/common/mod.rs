@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
-const PROTOCOL_VERSION: u32 = 2;
+const PROTOCOL_VERSION: u32 = 3;
 
 pub struct Fixture {
     dir: PathBuf,
@@ -330,10 +330,30 @@ impl Fixture {
         }
     }
 
+    pub fn script_output_for(&self, tool: &str, command: &str, output: &str) {
+        fs::write(self.stub_dir.join(format!("{tool}.{command}.out")), output).unwrap();
+    }
+
     /// What `adb devices -l` prints from now on: one `(serial, adb's word for
     /// its state, model)` per attached phone. An unauthorised phone reports no
     /// model, which is why the model is optional here.
     pub fn script_devices(&self, attached: &[(&str, &str, Option<&str>)]) {
+        fs::write(
+            self.stub_dir.join("adb.out"),
+            Self::devices_output(attached),
+        )
+        .unwrap();
+    }
+
+    pub fn script_devices_on_connect(&self, attached: &[(&str, &str, Option<&str>)]) {
+        fs::write(
+            self.stub_dir.join("adb.connect.devices"),
+            Self::devices_output(attached),
+        )
+        .unwrap();
+    }
+
+    fn devices_output(attached: &[(&str, &str, Option<&str>)]) -> String {
         let mut out = String::from("List of devices attached\n");
         for (serial, status, model) in attached {
             out.push_str(&format!("{serial}\t{status} usb:1-4"));
@@ -342,7 +362,7 @@ impl Fixture {
             }
             out.push_str(" transport_id:1\n");
         }
-        fs::write(self.stub_dir.join("adb.out"), out).unwrap();
+        out
     }
 }
 

@@ -23,7 +23,7 @@ Panel {
 
   // The protocol the daemon speaks, from src/protocol.rs. A mismatch is
   // reported rather than misparsed.
-  readonly property int protocol: 2
+  readonly property int protocol: 3
 
   // The whole state, exactly as pushed, or null while we have not been told.
   // Not `state`: every QML Item already has one of those.
@@ -50,7 +50,10 @@ Panel {
   // What the bar has to warn about: something is wrong and only the person at
   // the desk can fix it. No phone attached is not trouble, it is Tuesday.
   readonly property bool troubled: daemonState
-    ? (!daemonState.adb_ok || connectionState === "unauthorised")
+    ? (!daemonState.adb_ok
+      || connectionState === "unauthorised"
+      || connectionState === "pairing_failed"
+      || connectionState === "unreachable")
     : unreachable
 
   // The phone the connection names, in whatever phase it is in.
@@ -68,16 +71,22 @@ Panel {
   // moves.
   readonly property var choices: {
     if (!daemonState) return []
-    var attached = daemonState.attached || []
-    if (attached.length === 1 && attached[0].phone.serial === selectedSerial) return []
-    return attached
+    var choices = (daemonState.attached || []).slice()
+    var knownPhones = daemonState.known || []
+    knownPhones.forEach(function (known) {
+      if (!choices.some(function (item) { return item.phone.serial === known.phone.serial })) {
+        choices.push({"phone": known.phone, "authorised": true})
+      }
+    })
+    if (choices.length === 1 && choices[0].phone.serial === selectedSerial) return []
+    return choices
   }
 
   // What the picker has to say before someone clicks it, not after.
   function pickerNote() {
     var notes = []
     if (capturing) notes.push("Switching stops the capture")
-    if (choices.some(function (phone) { return !phone.authorised }))
+    if (choices.some(function (phone) { return phone.authorised === false }))
       notes.push("A dimmed phone has not accepted the debugging prompt")
     return notes.join(" · ")
   }
@@ -135,6 +144,14 @@ Panel {
     if (connection.state === "unauthorised") return connection.phone.name + " has not accepted the debugging prompt"
     if (connection.state === "connecting") return "Connecting to " + connection.phone.name
     if (connection.state === "connected") return connection.phone.name + " connected"
+    if (connection.state === "needs_pairing") return "Wireless pairing needed — run omavcam pair"
+    if (connection.state === "pairing_failed") {
+      if (connection.reason === "wrong_code") return "Wireless pairing failed — wrong code"
+      if (connection.reason === "wrong_address") return "Wireless pairing failed — wrong pairing address"
+      return "Wireless pairing failed — phone may be on a different network"
+    }
+    if (connection.state === "unreachable")
+      return connection.phone.name + " unreachable — check the network or connect port"
     return connection.state
   }
 
@@ -318,7 +335,7 @@ Panel {
               // Dimmed, not disabled: selecting it is how the panel comes to
               // say which phone needs the prompt accepted, and a row that
               // cannot be clicked is a dead end instead of an instruction.
-              opacity: modelData.authorised ? 1 : 0.55
+              opacity: modelData.authorised === false ? 0.55 : 1
               foreground: root.foreground
               fontFamily: root.fontFamily
               tooltipText: modelData.phone.serial

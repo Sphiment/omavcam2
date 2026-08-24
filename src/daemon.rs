@@ -741,6 +741,14 @@ fn update_connect_address(
                 format!("no paired phone {serial:?} is known"),
             )
         })?;
+    if known
+        .connect_address
+        .as_deref()
+        .unwrap_or(&known.phone.serial)
+        == connect_address
+    {
+        return Ok(());
+    }
     if !phones::connect_wireless(connect_address) {
         let attached = shared.lock().unwrap().state.attached.clone();
         publish_connection(
@@ -754,25 +762,29 @@ fn update_connect_address(
         return Err(("unreachable", unreachable_message().to_string()));
     }
     let attached = phones::scan().map_err(|error| {
+        phones::disconnect_wireless(connect_address);
         eprintln!("omavcam: could not scan phones after connecting: {error}");
         publish_adb_failure(shared);
         ("adb_unavailable", error.to_string())
     })?;
-    let listed: Vec<protocol::Attached> = attached.iter().map(Into::into).collect();
-    let found = attached
+    let mut listed: Vec<protocol::Attached> = attached.iter().map(Into::into).collect();
+    let Some(found) = attached
         .iter()
         .find(|phone| phone.serial == connect_address && phone.adb_state == "device")
-        .ok_or_else(|| {
-            publish_connection(
-                shared,
-                Connection::Unreachable {
-                    phone: known.phone.clone(),
-                    connect_address: connect_address.to_string(),
-                },
-                listed.clone(),
-            );
-            ("unreachable", unreachable_message().to_string())
-        })?;
+    else {
+        if phones::disconnect_wireless(connect_address) {
+            listed.retain(|phone| phone.phone.serial != connect_address);
+        }
+        publish_connection(
+            shared,
+            Connection::Unreachable {
+                phone: known.phone.clone(),
+                connect_address: connect_address.to_string(),
+            },
+            listed,
+        );
+        return Err(("unreachable", unreachable_message().to_string()));
+    };
     let stable_id = match phones::stable_id(connect_address) {
         Some(stable_id) => stable_id,
         None => {

@@ -122,10 +122,10 @@ pub fn connect_wireless(address: &str) -> bool {
     })
 }
 
-pub fn disconnect_wireless(address: &str) {
+pub fn disconnect_wireless(address: &str) -> bool {
     let mut process = Command::new("adb");
     process.args(["disconnect", address]);
-    let _ = command::status(process);
+    matches!(command::status(process), Ok(status) if status.success())
 }
 
 pub fn stable_id(serial: &str) -> Option<String> {

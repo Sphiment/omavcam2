@@ -150,13 +150,20 @@ fn the_selected_phone_vanishing_does_not_switch_to_another() {
     client.await_state("the phone to connect", is("connected"));
 
     // Unplugged, and something else is on the desk. Silently repointing a
-    // webcam at a different room is worse than reporting no phone.
+    // webcam at a different room is worse than asking — but saying "no phone"
+    // with a phone on the desk hides it and offers nothing to click, so the
+    // one that is here is offered as a choice instead (#23).
     f.script_devices(&[(GALAXY, "device", Some("Galaxy_S21"))]);
 
-    client.await_state("no phone", is("no_phone"));
+    let state = client.await_state("the phone that is here to be offered", is("unselected"));
+    assert_eq!(
+        state["connection"]["available"][0]["serial"],
+        json!(GALAXY),
+        "the phone on the desk is named rather than hidden"
+    );
     assert!(
         !f.argv().iter().any(|line| line.contains(GALAXY)),
-        "the other phone was never touched: {:?}",
+        "offered, but never touched until it is chosen: {:?}",
         f.argv()
     );
 }

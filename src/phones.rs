@@ -177,13 +177,14 @@ pub fn resolve(attached: &[Attached], selected: Option<&str>) -> (Connection, Op
     let remembered = selected.and_then(|s| attached.iter().find(|a| a.serial == s));
     let (phone, remember) = match remembered {
         Some(phone) => (phone, false),
-        // A phone was chosen and is not here. Another one being attached does
-        // not make it the one: silently repointing a webcam at a different room
-        // is worse than reporting no phone.
-        None if selected.is_some() => return (Connection::NoPhone, None),
-        // One phone is the phone. Two and the user picks, because the extra one
-        // is usually charging.
-        None if attached.len() == 1 => (&attached[0], true),
+        // One phone and nothing remembered is the phone. Two and the user
+        // picks, because the extra one is usually charging.
+        None if selected.is_none() && attached.len() == 1 => (&attached[0], true),
+        // Otherwise the user picks — including when a phone was chosen and is
+        // not here. Another one being attached still does not make it the one,
+        // because silently repointing a webcam at a different room is worse
+        // than asking; but answering "no phone" with phones on the desk hid
+        // them and offered nothing to choose, so they are offered instead.
         None => {
             let available = attached.iter().map(Phone::from).collect();
             return (Connection::Unselected { available }, None);
@@ -342,12 +343,21 @@ mod tests {
             resolve(&two, Some("b")).0,
             Connection::Connecting { .. }
         ));
-        // Remembered phone gone: no phone, not the other one — and that holds
-        // when the other one is the only phone on the desk. A single attached
-        // phone is auto-selected only while nothing has been chosen before;
-        // after that, choosing again is the user's to do.
-        assert_eq!(resolve(&two, Some("z")).0, Connection::NoPhone);
-        assert_eq!(resolve(&one, Some("z")).0, Connection::NoPhone);
+        // Remembered phone gone: never the other one, but never silence
+        // either. The phones on the desk are offered, and that holds when the
+        // other one is the only phone there. A single attached phone is
+        // auto-selected only while nothing has been chosen before; after that,
+        // choosing again is the user's to do.
+        for (attached, expected) in [(&two[..], 2), (&one[..], 1)] {
+            let (connection, remember) = resolve(attached, Some("z"));
+            let Connection::Unselected { available } = connection else {
+                panic!("a remembered phone that is gone offers the ones that are here");
+            };
+            assert_eq!(available.len(), expected);
+            // The rule this must never break: the phone that is here does not
+            // become the phone just by being here.
+            assert_eq!(remember, None);
+        }
         assert!(matches!(
             resolve(&[attached("a", "unauthorized")], None).0,
             Connection::Unauthorised { .. }

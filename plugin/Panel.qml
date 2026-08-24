@@ -74,7 +74,11 @@ Panel {
     var choices = (daemonState.attached || []).slice()
     var knownPhones = daemonState.known || []
     knownPhones.forEach(function (known) {
-      if (!choices.some(function (item) { return item.phone.serial === known.phone.serial })) {
+      if (known.transport === "wireless"
+          && !choices.some(function (item) {
+            return item.phone.serial === known.phone.serial
+              || item.phone.serial === known.hardware_id
+          })) {
         choices.push({"phone": known.phone, "authorised": true})
       }
     })

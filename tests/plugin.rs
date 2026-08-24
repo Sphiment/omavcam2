@@ -98,3 +98,13 @@ fn the_plugin_asks_the_daemon_and_runs_nothing_itself() {
         }
     }
 }
+
+#[test]
+fn the_picker_only_offers_unplugged_wireless_phones() {
+    let panel = fs::read_to_string(repo().join("plugin/Panel.qml")).unwrap();
+    assert!(
+        panel.contains("known.transport === \"wireless\"")
+            && panel.contains("item.phone.serial === known.hardware_id"),
+        "an unplugged wired registry entry cannot be selected"
+    );
+}

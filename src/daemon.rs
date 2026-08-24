@@ -117,13 +117,7 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
             // adb cannot see anything, so neither can we. Leaving the last
             // list standing would offer a picker full of phones nothing has
             // confirmed are still there.
-            let state = State {
-                adb_ok: false,
-                connection: Connection::NoPhone,
-                attached: Vec::new(),
-                ..shared.lock().unwrap().state.clone()
-            };
-            publish(shared, state);
+            publish_adb_failure(shared);
             return false;
         }
     };
@@ -140,17 +134,20 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
         return true;
     }
 
+    let mut verified_wireless = None;
     let reconnect = {
         let inner = shared.lock().unwrap();
         inner.registry.selected.as_deref().and_then(|selected| {
-            (!attached.iter().any(|phone| phone.serial == selected))
-                .then(|| {
-                    inner.registry.phones.iter().find(|known| {
-                        known.phone.serial == selected && known.transport == Transport::Wireless
-                    })
+            (!attached
+                .iter()
+                .any(|phone| phone.serial == selected && phone.adb_state == "device"))
+            .then(|| {
+                inner.registry.phones.iter().find(|known| {
+                    known.phone.serial == selected && known.transport == Transport::Wireless
                 })
-                .flatten()
-                .cloned()
+            })
+            .flatten()
+            .cloned()
         })
     };
     if let Some(known) = reconnect {
@@ -174,12 +171,13 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
             Ok(attached) => attached,
             Err(e) => {
                 eprintln!("omavcam: could not scan phones after connecting: {e}");
+                publish_adb_failure(shared);
                 return false;
             }
         };
         let found = attached
             .iter()
-            .find(|phone| phone.serial == address)
+            .find(|phone| phone.serial == address && phone.adb_state == "device")
             .cloned();
         let Some(found) = found else {
             let listed = attached.iter().map(Into::into).collect();
@@ -194,7 +192,30 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
             return true;
         };
         let stable_id = phones::stable_id(&address);
-        remember_wireless(shared, &address, &found.name, stable_id.as_deref());
+        if known.hardware_id.is_some() && stable_id.as_deref() != known.hardware_id.as_deref() {
+            phones::disconnect_wireless(&address);
+            let listed = attached.iter().map(Into::into).collect();
+            publish_connection(
+                shared,
+                Connection::Unreachable {
+                    phone: known.phone,
+                    connect_address: address,
+                },
+                listed,
+            );
+            return true;
+        }
+        if stable_id.is_some() {
+            verified_wireless = Some(address.clone());
+        }
+        remember_wireless(
+            shared,
+            &address,
+            &found.name,
+            stable_id.as_deref(),
+            None,
+            true,
+        );
     }
 
     let (connection, remember) = {
@@ -204,23 +225,69 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
     if let Some(serial) = remember {
         remember_selection(shared, serial);
     }
-    remember_attached(shared, &attached);
 
     // A phone already connected and still reported as usable is not asked
-    // again. `offline` devices remain listed by adb, so identity alone is not
-    // enough to preserve Connected.
-    let connection = match (&connection, &shared.lock().unwrap().state.connection) {
-        (Connection::Connecting { phone }, Connection::Connected { phone: same })
-            if phone == same
+    // again. Every other transition to a known wireless endpoint verifies the
+    // physical phone before targeted commands can call it Connected.
+    let previous_connection = shared.lock().unwrap().state.connection.clone();
+    let already_connected = match (&connection, &previous_connection) {
+        (Connection::Connecting { phone }, Connection::Connected { phone: same }) => {
+            phone == same
                 && attached
                     .iter()
-                    .any(|item| item.serial == phone.serial && item.adb_state == "device") =>
-        {
-            Connection::Connected {
-                phone: phone.clone(),
+                    .any(|item| item.serial == phone.serial && item.adb_state == "device")
+        }
+        _ => false,
+    };
+    if !already_connected {
+        if let Connection::Connecting { phone } = &connection {
+            let known = shared
+                .lock()
+                .unwrap()
+                .registry
+                .phones
+                .iter()
+                .find(|known| {
+                    known.transport == Transport::Wireless && known.phone.serial == phone.serial
+                })
+                .cloned();
+            if let Some(known) = known {
+                if verified_wireless.as_deref() != Some(phone.serial.as_str()) {
+                    let stable_id = phones::stable_id(&phone.serial);
+                    if known.hardware_id.is_some()
+                        && stable_id.as_deref() != known.hardware_id.as_deref()
+                    {
+                        phones::disconnect_wireless(&phone.serial);
+                        let listed: Vec<protocol::Attached> =
+                            attached.iter().map(Into::into).collect();
+                        publish_connection(
+                            shared,
+                            Connection::Unreachable {
+                                phone: known.phone,
+                                connect_address: phone.serial.clone(),
+                            },
+                            listed,
+                        );
+                        return true;
+                    }
+                    if let Some(stable_id) = stable_id {
+                        remember_wireless(
+                            shared,
+                            &phone.serial,
+                            &phone.name,
+                            Some(&stable_id),
+                            None,
+                            true,
+                        );
+                    }
+                }
             }
         }
-        _ => connection,
+    }
+    remember_attached(shared, &attached);
+    let connection = match connection {
+        Connection::Connecting { phone } if already_connected => Connection::Connected { phone },
+        connection => connection,
     };
     let listed: Vec<protocol::Attached> = attached.iter().map(Into::into).collect();
     publish_connection(shared, connection.clone(), listed.clone());
@@ -243,11 +310,11 @@ fn remember_attached(shared: &Shared, attached: &[phones::Attached]) {
         for attached in attached.iter().filter(|phone| {
             phone.adb_state == "device" && selected.as_deref() == Some(&phone.serial)
         }) {
-            if let Some(known) =
-                inner.registry.phones.iter_mut().find(|known| {
-                    known.phone.serial == attached.serial || known.id == attached.serial
-                })
-            {
+            if let Some(known) = inner.registry.phones.iter_mut().find(|known| {
+                known.phone.serial == attached.serial
+                    || known.id == attached.serial
+                    || known.hardware_id.as_deref() == Some(&attached.serial)
+            }) {
                 if known.phone.name != attached.name {
                     known.phone.name = attached.name.clone();
                     changed = true;
@@ -259,6 +326,7 @@ fn remember_attached(shared: &Shared, attached: &[phones::Attached]) {
             } else {
                 inner.registry.phones.push(KnownPhone {
                     id: attached.serial.clone(),
+                    hardware_id: Some(attached.serial.clone()),
                     phone: Phone::from(attached),
                     transport: Transport::Wired,
                     connect_address: None,
@@ -286,6 +354,20 @@ fn publish_connection(shared: &Shared, connection: Connection, attached: Vec<pro
         attached,
         known,
         ..shared.lock().unwrap().state.clone()
+    };
+    publish(shared, state);
+}
+
+fn publish_adb_failure(shared: &Shared) {
+    let state = {
+        let inner = shared.lock().unwrap();
+        State {
+            adb_ok: false,
+            connection: Connection::NoPhone,
+            attached: Vec::new(),
+            known: inner.registry.phones.clone(),
+            ..inner.state.clone()
+        }
     };
     publish(shared, state);
 }
@@ -432,45 +514,77 @@ fn save_registry(shared: &Shared) {
     }
 }
 
-fn remember_wireless(shared: &Shared, address: &str, name: &str, stable_id: Option<&str>) -> Phone {
+fn remember_wireless(
+    shared: &Shared,
+    address: &str,
+    name: &str,
+    stable_id: Option<&str>,
+    previous_address: Option<&str>,
+    select: bool,
+) -> Phone {
     let phone = Phone {
         serial: address.to_string(),
         name: name.to_string(),
     };
     {
         let mut inner = shared.lock().unwrap();
-        inner.registry.selected = Some(address.to_string());
-        let index = stable_id
-            .and_then(|id| {
-                inner
-                    .registry
-                    .phones
-                    .iter()
-                    .position(|known| known.id == id)
+        if select {
+            inner.registry.selected = Some(address.to_string());
+        }
+        let address_id = inner
+            .registry
+            .phones
+            .iter()
+            .find(|known| {
+                known.phone.serial == address
+                    || previous_address == Some(known.phone.serial.as_str())
             })
-            .or_else(|| {
-                inner
-                    .registry
-                    .phones
-                    .iter()
-                    .position(|known| known.phone.serial == address)
-            });
-        let mut known = index
-            .map(|index| inner.registry.phones.remove(index))
-            .unwrap_or_else(|| KnownPhone {
-                id: stable_id.unwrap_or(address).to_string(),
+            .map(|known| known.id.clone());
+        let physical_id = stable_id.and_then(|id| {
+            inner
+                .registry
+                .phones
+                .iter()
+                .find(|known| known.hardware_id.as_deref() == Some(id) || known.id == id)
+                .map(|known| known.id.clone())
+        });
+        let canonical_id = physical_id.or_else(|| address_id.clone());
+        let mut known = if let Some(id) = canonical_id {
+            let index = inner
+                .registry
+                .phones
+                .iter()
+                .position(|known| known.id == id)
+                .unwrap();
+            inner.registry.phones.remove(index)
+        } else {
+            KnownPhone {
+                id: address.to_string(),
+                hardware_id: None,
                 phone: phone.clone(),
                 transport: Transport::Wireless,
                 connect_address: Some(address.to_string()),
-            });
+            }
+        };
+        if let Some(id) = address_id.filter(|id| id != &known.id) {
+            if let Some(index) = inner
+                .registry
+                .phones
+                .iter()
+                .position(|other| other.id == id)
+            {
+                inner.registry.phones.remove(index);
+            }
+        }
         known.phone = phone.clone();
         known.transport = Transport::Wireless;
         known.connect_address = Some(address.to_string());
         if let Some(id) = stable_id {
-            known.id = id.to_string();
+            known.hardware_id = Some(id.to_string());
         }
         inner.registry.phones.retain(|other| {
-            other.phone.serial != address && stable_id.is_none_or(|id| other.id != id)
+            other.phone.serial != address
+                && stable_id.is_none_or(|id| other.hardware_id.as_deref() != Some(id))
         });
         inner.registry.phones.push(known);
         inner.registry.phones.sort_by(|a, b| a.id.cmp(&b.id));
@@ -539,7 +653,7 @@ fn pair_phone(
     {
         stop_capture_locked(shared);
     }
-    let provisional = remember_wireless(shared, connect_address, connect_address, None);
+    let provisional = remember_wireless(shared, connect_address, connect_address, None, None, true);
     if !phones::connect_wireless(connect_address) {
         let attached = shared.lock().unwrap().state.attached.clone();
         publish_connection(
@@ -553,19 +667,35 @@ fn pair_phone(
         return Err(("unreachable", unreachable_message().to_string()));
     }
 
-    let mut connected = provisional;
-    let mut listed = Vec::new();
-    if let Ok(attached) = phones::scan() {
-        listed = attached.iter().map(Into::into).collect();
-        if let Some(found) = attached
-            .iter()
-            .find(|phone| phone.serial == connect_address)
-        {
-            let stable_id = phones::stable_id(connect_address);
-            connected =
-                remember_wireless(shared, connect_address, &found.name, stable_id.as_deref());
-        }
-    }
+    let attached = phones::scan().map_err(|error| {
+        eprintln!("omavcam: could not scan phones after connecting: {error}");
+        publish_adb_failure(shared);
+        ("adb_unavailable", error.to_string())
+    })?;
+    let listed: Vec<protocol::Attached> = attached.iter().map(Into::into).collect();
+    let found = attached
+        .iter()
+        .find(|phone| phone.serial == connect_address && phone.adb_state == "device")
+        .ok_or_else(|| {
+            publish_connection(
+                shared,
+                Connection::Unreachable {
+                    phone: provisional.clone(),
+                    connect_address: connect_address.to_string(),
+                },
+                listed.clone(),
+            );
+            ("unreachable", unreachable_message().to_string())
+        })?;
+    let stable_id = phones::stable_id(connect_address);
+    let connected = remember_wireless(
+        shared,
+        connect_address,
+        &found.name,
+        stable_id.as_deref(),
+        None,
+        true,
+    );
     publish_connection(shared, Connection::Connecting { phone: connected }, listed);
     refresh_connection_locked(shared);
     if matches!(
@@ -597,63 +727,111 @@ fn update_connect_address(
                 .to_string(),
         ));
     }
-    let phone =
-        {
-            let mut inner = shared.lock().unwrap();
-            let Some(known) = inner.registry.phones.iter_mut().find(|known| {
-                known.phone.serial == serial && known.transport == Transport::Wireless
-            }) else {
-                return Err((
-                    "no_such_phone",
-                    format!("no paired phone {serial:?} is known"),
-                ));
-            };
-            known.phone.serial = connect_address.to_string();
-            known.connect_address = Some(connect_address.to_string());
-            let phone = known.phone.clone();
-            if inner.registry.selected.as_deref() == Some(serial) {
-                inner.registry.selected = Some(connect_address.to_string());
-            }
-            phone
-        };
-    save_registry(shared);
-
-    let capture_uses_old_address = shared
+    let known = shared
         .lock()
         .unwrap()
-        .state
-        .capture
-        .as_ref()
-        .is_some_and(|capture| capture.phone.serial == serial);
-    if capture_uses_old_address {
-        stop_capture_locked(shared);
-    }
+        .registry
+        .phones
+        .iter()
+        .find(|known| known.phone.serial == serial && known.transport == Transport::Wireless)
+        .cloned()
+        .ok_or_else(|| {
+            (
+                "no_such_phone",
+                format!("no paired phone {serial:?} is known"),
+            )
+        })?;
     if !phones::connect_wireless(connect_address) {
         let attached = shared.lock().unwrap().state.attached.clone();
         publish_connection(
             shared,
             Connection::Unreachable {
-                phone,
+                phone: known.phone,
                 connect_address: connect_address.to_string(),
             },
             attached,
         );
         return Err(("unreachable", unreachable_message().to_string()));
     }
-    if let Ok(attached) = phones::scan() {
-        if let Some(found) = attached
+    let attached = phones::scan().map_err(|error| {
+        eprintln!("omavcam: could not scan phones after connecting: {error}");
+        publish_adb_failure(shared);
+        ("adb_unavailable", error.to_string())
+    })?;
+    let listed: Vec<protocol::Attached> = attached.iter().map(Into::into).collect();
+    let found = attached
+        .iter()
+        .find(|phone| phone.serial == connect_address && phone.adb_state == "device")
+        .ok_or_else(|| {
+            publish_connection(
+                shared,
+                Connection::Unreachable {
+                    phone: known.phone.clone(),
+                    connect_address: connect_address.to_string(),
+                },
+                listed.clone(),
+            );
+            ("unreachable", unreachable_message().to_string())
+        })?;
+    let stable_id = phones::stable_id(connect_address).ok_or_else(|| {
+        (
+            "phone_identity_failed",
+            "could not verify that the new connect address belongs to the paired phone".to_string(),
+        )
+    })?;
+    if known
+        .hardware_id
+        .as_deref()
+        .is_some_and(|expected| expected != stable_id)
+    {
+        return Err((
+            "wrong_phone",
+            "the new connect address belongs to a different phone; selection was not changed"
+                .to_string(),
+        ));
+    }
+
+    let (capture_uses_old_address, was_selected) = {
+        let inner = shared.lock().unwrap();
+        let physical_serial = inner
+            .registry
+            .phones
             .iter()
-            .find(|phone| phone.serial == connect_address)
-        {
-            let stable_id = phones::stable_id(connect_address);
-            remember_wireless(shared, connect_address, &found.name, stable_id.as_deref());
-        }
+            .find(|known| known.hardware_id.as_deref() == Some(&stable_id))
+            .map(|known| known.phone.serial.as_str());
+        let same_phone = |candidate: &str| {
+            candidate == serial || physical_serial.is_some_and(|physical| candidate == physical)
+        };
+        (
+            inner
+                .state
+                .capture
+                .as_ref()
+                .is_some_and(|capture| same_phone(&capture.phone.serial)),
+            inner.registry.selected.as_deref().is_some_and(same_phone),
+        )
+    };
+    let phone = remember_wireless(
+        shared,
+        connect_address,
+        &found.name,
+        Some(&stable_id),
+        Some(serial),
+        was_selected,
+    );
+    if capture_uses_old_address {
+        stop_capture_locked(shared);
+    }
+    if was_selected {
+        publish_connection(shared, Connection::Connecting { phone }, listed);
     }
     refresh_connection_locked(shared);
-    if matches!(
-        &shared.lock().unwrap().state.connection,
-        Connection::Connected { phone } if phone.serial == connect_address
-    ) {
+    if !was_selected
+        || matches!(
+            &shared.lock().unwrap().state.connection,
+            Connection::Connected { phone } if phone.serial == connect_address
+        )
+    {
         Ok(())
     } else {
         Err(("unreachable", unreachable_message().to_string()))
@@ -711,13 +889,7 @@ fn forget_phone(shared: &Shared, serial: &str) -> Result<(), (&'static str, Stri
 fn refresh_adb(shared: &Shared) -> bool {
     let _turn = transition();
     if !probe_adb() {
-        let state = State {
-            adb_ok: false,
-            connection: Connection::NoPhone,
-            attached: Vec::new(),
-            ..shared.lock().unwrap().state.clone()
-        };
-        publish(shared, state);
+        publish_adb_failure(shared);
         return false;
     }
     refresh_connection_locked(shared)
@@ -732,7 +904,7 @@ fn select_phone(shared: &Shared, serial: &str) -> Result<(), (&'static str, Stri
         .registry
         .phones
         .iter()
-        .any(|known| known.phone.serial == serial);
+        .any(|known| known.phone.serial == serial && known.transport == Transport::Wireless);
     if !is_known && !attached.iter().any(|phone| phone.serial == serial) {
         // Say what *is* attached: the caller cannot always see it. A remembered
         // phone that is unplugged reports `NoPhone`, so this error is also how

@@ -242,6 +242,9 @@ impl Registry {
             } else if phone.hardware_id.is_none()
                 && !phone.id.is_empty()
                 && phone.connect_address.as_deref() != Some(&phone.id)
+                // ponytail: old registries have no identity provenance; version the
+                // format if Android ever emits hardware IDs shaped like endpoints.
+                && !valid_endpoint(&phone.id)
             {
                 phone.hardware_id = Some(phone.id.clone());
             }
@@ -357,23 +360,36 @@ mod tests {
     }
 
     #[test]
-    fn an_old_wireless_id_is_recognised_as_its_hardware_id() {
+    fn migration_distinguishes_old_hardware_ids_from_changed_endpoints() {
         let mut registry = Registry {
-            phones: vec![KnownPhone {
-                id: "device-id".into(),
-                hardware_id: None,
-                phone: Phone {
-                    serial: "192.0.2.1:40000".into(),
-                    name: "Pixel".into(),
+            phones: vec![
+                KnownPhone {
+                    id: "device-id".into(),
+                    hardware_id: None,
+                    phone: Phone {
+                        serial: "192.0.2.1:40000".into(),
+                        name: "Pixel".into(),
+                    },
+                    transport: crate::protocol::Transport::Wireless,
+                    connect_address: Some("192.0.2.1:40000".into()),
                 },
-                transport: crate::protocol::Transport::Wireless,
-                connect_address: Some("192.0.2.1:40000".into()),
-            }],
+                KnownPhone {
+                    id: "192.0.2.1:39000".into(),
+                    hardware_id: None,
+                    phone: Phone {
+                        serial: "192.0.2.1:40000".into(),
+                        name: "Pixel".into(),
+                    },
+                    transport: crate::protocol::Transport::Wireless,
+                    connect_address: Some("192.0.2.1:40000".into()),
+                },
+            ],
             ..Registry::default()
         };
 
         registry.migrate_hardware_ids();
 
         assert_eq!(registry.phones[0].hardware_id.as_deref(), Some("device-id"));
+        assert_eq!(registry.phones[1].hardware_id, None);
     }
 }

@@ -55,6 +55,15 @@ Studio owns the flow, because guides and error states do not belong in a bar
 popup. The panel shows connection state and a button that opens Studio at the
 right place. The panel stays a status light and a switch.
 
+**Amended (#6): plus the picker, while nothing is chosen.** Choosing between
+two attached phones is the one step of this machine that is a choice rather
+than a guide — there is nothing to explain and nothing that can fail, only two
+names and a click. Sending someone to Studio to click one of two buttons costs
+more than it teaches, and the panel is where they already are. It stays out of
+the panel in every other state: once a phone is remembered there is no choice
+left to make, and repointing the webcam at the other phone is a deliberate act
+that stops a running capture, which belongs with the rest of the flow.
+
 ## Losing the phone mid-capture
 
 Treated as a state of this same machine rather than an error path of its own: the

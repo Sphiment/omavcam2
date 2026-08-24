@@ -120,8 +120,9 @@ crop framing. Changes made here are pending until applied.
 _Avoid_: settings window, editor, panel
 
 **Panel**:
-The popup behind the bar widget. A status light, a switch, and a way into
-Studio. Never the place where settings are configured.
+The popup behind the bar widget. A status light, a switch, a way into Studio,
+and — only while no phone is chosen — the picker (ADR-0007). Never the place
+where settings are configured.
 _Avoid_: widget, popup, menu
 
 **Preview**:

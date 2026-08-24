@@ -14,7 +14,8 @@ them. See [CONTEXT.md](CONTEXT.md) for the vocabulary and
 Early. What exists today is the daemon, the socket protocol, the test harness
 everything else is built on, wired connection — plug a phone in over USB and
 `omavcam status` names it — and a capture that can be started and stopped:
-`omavcam start` and the phone's camera appears in Meet's camera list.
+`omavcam start` and the phone's camera appears in Meet's camera list. There is
+also a bar widget, so none of that needs a terminal.
 
 There is no wireless, no preview, and no settings — the capture runs at its
 defaults. Those are the next tickets.
@@ -124,6 +125,13 @@ point of `exclusive_caps=1`, not a side effect: an idle omavcam showing black
 in Meet's dropdown is what it avoids. The corollary is that omavcam is absent
 from the list until a capture is running, so it is picked after starting.
 
+Locking the phone mid-capture is fine: the stream is unaffected, and both
+lenses capture with the screen off and the lockscreen up. **Face unlock is
+not.** The recognition service takes a camera to do its job, and the limit on
+open cameras is system-wide, so unlocking that way while a capture is running
+takes the camera out from under it — unlock with a PIN instead, or start the
+capture afterwards.
+
 scrcpy dying on its own — the phone unplugged, the process killed — moves the
 state to stopped, so the switch never claims to be on while nothing is feeding.
 An application already watching survives that: frames stop, it keeps showing its
@@ -136,6 +144,42 @@ The daemon leaves `keep_format=0`: an application already reading the camera
 pins the format by itself, while an idle node must remain free to accept the
 size changes ticket #9 allows. `sustain_framerate` and `timeout` keep consumers
 that dislike stalled input attached across a same-size restart.
+
+## The bar widget
+
+An Omarchy plugin lives at the root of this repo, so it installs the ordinary
+way and there is nothing to build:
+
+```sh
+omarchy plugin add https://github.com/Sphiment/omavcam2.git --enable
+```
+
+The icon says which of three things is true at a glance: a capture is running,
+nothing is capturing, or something is wrong that only the person at the desk
+can fix — adb missing, the daemon unreachable, a phone that has not accepted
+the debugging prompt. Finding that out before the call is the entire point.
+
+Clicking it opens the **panel**: a status light, the connection in words, and
+the switch that starts and stops the capture. When several phones are attached
+and none is chosen, the panel offers them and picking one takes effect — that
+is the whole of the picker, because once a phone is remembered there is no
+choice left to make and pointing the webcam at the other one is the deliberate
+act `omavcam select` exists for. Nothing else goes in there — settings are
+Studio's job, and the frequent action has to be instant.
+
+The plugin holds no state and makes no system calls. It opens the socket,
+renders what it is pushed, and sends requests; every `scrcpy`, `adb` and
+`hyprctl` invocation in this project lives in the daemon (ADR-0001), and a
+test asserts the plugin has no way to run one. Connecting is also what starts
+the daemon, so the widget appearing in the bar is what makes omavcam exist.
+
+State changed from elsewhere — `omavcam start` in a terminal, a phone
+unplugged — arrives as a push, so the panel is right without being reopened.
+A daemon that stops leaves the widget saying so and reconnecting recovers it,
+which is the whole of the recovery: the daemon pushes its state on connect and
+there is nothing to resync. The wait between attempts doubles up to half a
+minute, because a daemon that cannot start at all would otherwise be asked to
+twice a second forever, and every attempt is another failed activation.
 
 ## How the pieces talk
 
@@ -185,6 +229,8 @@ src/daemon.rs     the daemon: state, clients, pushing
 src/phones.rs     what adb sees, which phone is selected, what that means
 src/capture.rs    finding the virtual camera, and launching scrcpy at it
 src/main.rs       the CLI, and the entry point for both
+manifest.json     the Omarchy plugin manifest, at the root so a clone installs
+plugin/Panel.qml  the bar widget and its panel: a client, and nothing more
 systemd/          the socket and service units
 tests/common/     the harness every test file is built on
 tests/            the tests, and the stub adb/scrcpy/v4l2-ctl/modprobe

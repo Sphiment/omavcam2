@@ -82,11 +82,14 @@ fn request(kind: &str, args: Value) -> ExitCode {
     // Not part of the error: the daemon cannot tell why scrcpy gave up, and
     // both tips are things only the person holding the phone can act on. The
     // phone does not need unlocking — measured, both lenses capture fine with
-    // the screen off and the lockscreen up.
+    // the screen off and the lockscreen up, and a running capture survives the
+    // phone being locked. What it does not survive is being *face*-unlocked:
+    // the recognition service takes a camera for itself, and the per-system
+    // limit means it blocks any lens, not only the one it wants.
     if code == "capture_failed" {
         eprintln!(
-            "tip: another app on the phone may be holding the camera — close it, or wait a \
-             moment after locking or unlocking, and try again\n\
+            "tip: another app on the phone may be holding the camera — close it and try again; \
+             face unlock is one of them, so unlock with a PIN while a capture is running\n\
              tip: `omavcam start --stay-awake` keeps the screen on while the phone is plugged \
              in, so the screen turning off mid-capture cannot disconnect the camera"
         );

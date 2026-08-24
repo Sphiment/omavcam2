@@ -248,10 +248,10 @@ fn parse(text: &str) -> Result<Vec<Lens>, String> {
             high_speed = true;
         } else if !high_speed {
             if let Some(size) = line.strip_prefix("- ") {
-                parse_size(size).ok_or_else(|| format!("invalid camera resolution {size:?}"))?;
+                parse_size(size).ok_or_else(|| format!("invalid lens resolution {size:?}"))?;
                 current
                     .as_mut()
-                    .ok_or_else(|| format!("camera resolution without a lens: {size:?}"))?
+                    .ok_or_else(|| format!("lens resolution without a lens: {size:?}"))?
                     .resolutions
                     .push(size.to_string());
             }
@@ -269,20 +269,20 @@ fn parse(text: &str) -> Result<Vec<Lens>, String> {
 fn parse_lens(rest: &str) -> Result<Lens, String> {
     let id_end = rest
         .find(char::is_whitespace)
-        .ok_or_else(|| format!("could not parse camera id from {rest:?}"))?;
+        .ok_or_else(|| format!("could not parse lens id from {rest:?}"))?;
     let id = rest[..id_end].to_string();
     if id.is_empty() {
-        return Err(format!("empty camera id in {rest:?}"));
+        return Err(format!("empty lens id in {rest:?}"));
     }
     let details = rest[id_end..]
         .trim()
         .strip_prefix('(')
         .and_then(|value| value.strip_suffix(')'))
-        .ok_or_else(|| format!("could not parse camera characteristics from {rest:?}"))?;
+        .ok_or_else(|| format!("could not parse lens characteristics from {rest:?}"))?;
     let mut fields = details.split(',').map(str::trim);
     let facing = fields.next().unwrap_or_default().to_string();
     if facing.is_empty() {
-        return Err(format!("empty camera facing in {rest:?}"));
+        return Err(format!("empty lens facing in {rest:?}"));
     }
     let sensor_size = fields.next().unwrap_or_default().to_string();
     parse_size(&sensor_size).ok_or_else(|| format!("invalid sensor size {sensor_size:?}"))?;

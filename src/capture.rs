@@ -233,15 +233,16 @@ pub fn has_consumer(node: &str, writer_pid: u32) -> std::io::Result<bool> {
                 continue;
             }
         };
-        // Other users cannot open this logind-owned camera. An unreadable
-        // same-user fd directory, however, is uncertainty and must fail closed.
-        if metadata.uid() != uid {
-            continue;
-        }
+        // Scan readable foreign processes too: an actual fd is conclusive.
+        // Merely being unable to inspect a different user's process is not,
+        // because logind grants the node to this session. Same-user
+        // uncertainty still needs the kernel probe below.
+        let same_user = metadata.uid() == uid;
         let fd_path = process.path().join("fd");
         let fds = match fs::read_dir(&fd_path) {
             Ok(fds) => fds,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) if !same_user => continue,
             Err(_) => {
                 uncertain = true;
                 continue;
@@ -251,6 +252,7 @@ pub fn has_consumer(node: &str, writer_pid: u32) -> std::io::Result<bool> {
             let fd = match fd {
                 Ok(fd) => fd,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) if !same_user => continue,
                 Err(_) => {
                     uncertain = true;
                     continue;
@@ -260,6 +262,7 @@ pub fn has_consumer(node: &str, writer_pid: u32) -> std::io::Result<bool> {
                 Ok(target) if target == std::path::Path::new(node) => return Ok(true),
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) if !same_user => {}
                 Err(_) => uncertain = true,
             }
         }
@@ -270,8 +273,9 @@ pub fn has_consumer(node: &str, writer_pid: u32) -> std::io::Result<bool> {
 
     // Some same-user sandbox processes deliberately hide their fd directory.
     // Ask the device whether a second reader can allocate buffers so those
-    // unrelated processes do not block Apply; any inconclusive answer remains
-    // an error rather than becoming "no consumer".
+    // unrelated processes do not block Apply. `command::output` bounds a
+    // stalled stream probe; any inconclusive answer remains an error rather
+    // than becoming "no consumer".
     let mut process = Command::new("v4l2-ctl");
     process.args([
         "-d",

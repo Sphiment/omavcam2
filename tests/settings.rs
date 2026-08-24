@@ -182,6 +182,17 @@ fn uncertain_consumer_detection_refuses_a_size_change() {
     assert_eq!(f.await_argv("scrcpy", 1).len(), 1, "capture was untouched");
 
     f.script_unknown_consumer(true);
+    f.script_hold("v4l2-ctl");
+    let response = client.request("apply");
+    f.script_release("v4l2-ctl");
+    assert_eq!(response["error"]["code"], json!("consumer_check_failed"));
+    assert!(response["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("did not finish within"));
+    assert_eq!(f.await_argv("scrcpy", 1).len(), 1, "capture was untouched");
+
+    f.script_unknown_consumer(true);
     assert_eq!(client.request("apply")["ok"], json!(true));
     f.script_unknown_consumer(false);
     assert_eq!(f.await_argv("scrcpy", 2).len(), 2, "free camera was proven");

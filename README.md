@@ -49,14 +49,27 @@ The binary lands at `target/release/omavcam`.
 
 ## Install
 
-Nothing packages this yet — that is [#16](../../issues/16). Until then, by hand:
+**The default Omarchy plugin install is not enough on its own.** Most Omarchy
+plugins are pure QML and `omarchy plugin add` is their whole installation; this
+one's widget is a thin client for a Rust daemon, so the daemon has to be built
+and installed too or the widget has nothing to talk to. Nothing packages this
+yet — that is [#16](../../issues/16). Until then, by hand:
 
 ```sh
+# 1. Clone and build the daemon (needs Rust, see Requirements)
+git clone https://github.com/Sphiment/omavcam2.git
+cd omavcam2
+cargo build --release
+
+# 2. Install the daemon and its systemd user units
 sudo install -Dm755 target/release/omavcam /usr/bin/omavcam
 install -Dm644 systemd/omavcam.socket ~/.config/systemd/user/omavcam.socket
 install -Dm644 systemd/omavcam.service ~/.config/systemd/user/omavcam.service
 systemctl --user daemon-reload
 systemctl --user enable --now omavcam.socket
+
+# 3. Add the bar widget — this is the only step the default plugin install covers
+omarchy plugin add https://github.com/Sphiment/omavcam2.git --enable
 ```
 
 The binary has to be at `/usr/bin/omavcam` because that is the path
@@ -202,12 +215,16 @@ restoring the phone's power setting.
 
 ## The bar widget
 
-An Omarchy plugin lives at the root of this repo, so it installs the ordinary
-way and there is nothing to build:
+An Omarchy plugin lives at the root of this repo, so the widget itself installs
+the ordinary way:
 
 ```sh
 omarchy plugin add https://github.com/Sphiment/omavcam2.git --enable
 ```
+
+The widget is only a client, though: the daemon must be built and installed
+first, or the bar shows a widget with nothing behind it — see
+[Install](#install).
 
 The icon says which of three things is true at a glance: a capture is running,
 nothing is capturing, or something is wrong that only the person at the desk

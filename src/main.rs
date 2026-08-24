@@ -174,7 +174,7 @@ fn render(state: &State) -> String {
         Connection::Reconnecting { phone: p } => {
             format!("phone: {} — reconnecting; last frame held", phone(p))
         }
-        Connection::NeedsPairing => "phone: wireless pairing needed\nopen Developer options → Wireless debugging → Pair device with pairing code; the pairing address beside the six-digit code and the connect address on the main screen are different\nthen run: omavcam pair <pair-address> <code> <connect-address>".to_string(),
+        Connection::NeedsPairing => "phone: wireless pairing needed\nopen Developer options → Wireless debugging → Pair device with pairing code; the pairing address beside the six-digit code and the connect address on the main screen are different\nthen run: omavcam pair <pair-address> <code> <connect-address>\nto go back to a phone on the cable instead: omavcam select <serial>".to_string(),
         Connection::PairingFailed { reason } => format!(
             "phone: wireless pairing failed — {}",
             match reason {

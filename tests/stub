@@ -15,6 +15,9 @@ command=$1
 specific="$OMAVCAM_STUB_DIR/$tool.$command"
 [ -f "$specific.out" ] && cat "$specific.out"
 [ ! -f "$specific.out" ] && [ -f "$OMAVCAM_STUB_DIR/$tool.out" ] && cat "$OMAVCAM_STUB_DIR/$tool.out"
+if [ "$tool" = adb ] && [ "$command" = connect ] && [ -f "$OMAVCAM_STUB_DIR/adb.connect.devices" ]; then
+  cp "$OMAVCAM_STUB_DIR/adb.connect.devices" "$OMAVCAM_STUB_DIR/adb.out"
+fi
 if [ "$tool" = v4l2-ctl ] && [ -f "$OMAVCAM_STUB_DIR/capture.pid" ]; then
   capture_pid=$(cat "$OMAVCAM_STUB_DIR/capture.pid")
   kill -0 "$capture_pid" 2>/dev/null && printf 'Video Capture\n'

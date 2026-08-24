@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use protocol::{socket_path, Connection, Phone, State, VERSION};
+use protocol::{socket_path, Connection, PairingFailure, Phone, State, Transport, VERSION};
 
 /// Long enough that a busy daemon is never cut off, short enough that a broken
 /// one leaves a message rather than a hung terminal. Under socket activation
@@ -32,6 +32,21 @@ fn main() -> ExitCode {
         [kind] if matches!(kind.as_str(), "status" | "refresh" | "start" | "stop") => {
             request(kind, json!({}))
         }
+        [command] if command == "phones" => request("status", json!({})),
+        [command] if command == "pair" => request("begin_pairing", json!({})),
+        [command, pair_address, code, connect_address] if command == "pair" => request(
+            "pair",
+            json!({
+                "pair_address": pair_address,
+                "code": code,
+                "connect_address": connect_address,
+            }),
+        ),
+        [command, serial, connect_address] if command == "connect" => request(
+            "connect",
+            json!({"serial": serial, "connect_address": connect_address}),
+        ),
+        [command, serial] if command == "forget" => request("forget", json!({"serial": serial})),
         // Opt-in, because it changes a setting on someone's phone.
         [command, flag] if command == "start" && flag == "--stay-awake" => {
             request("start", json!({"stay_awake": true}))
@@ -45,7 +60,7 @@ fn main() -> ExitCode {
                 eprintln!("omavcam: invalid command: {command}");
             }
             eprintln!(
-                "usage: omavcam [status|refresh|select <serial>|start [--stay-awake]|stop|daemon]"
+                "usage: omavcam [status|phones|refresh|select <serial>|pair [<pair-address> <code> <connect-address>]|connect <serial> <connect-address>|forget <serial>|start [--stay-awake]|stop|daemon]"
             );
             ExitCode::from(2)
         }
@@ -116,9 +131,41 @@ fn render(state: &State) -> String {
         ),
         Connection::Connecting { phone: p } => format!("phone: {} — connecting", phone(p)),
         Connection::Connected { phone: p } => format!("phone: {} — connected", phone(p)),
+        Connection::NeedsPairing => "phone: wireless pairing needed\nopen Developer options → Wireless debugging → Pair device with pairing code; the pairing address beside the six-digit code and the connect address on the main screen are different\nthen run: omavcam pair <pair-address> <code> <connect-address>".to_string(),
+        Connection::PairingFailed { reason } => format!(
+            "phone: wireless pairing failed — {}",
+            match reason {
+                PairingFailure::WrongCode => "wrong code",
+                PairingFailure::WrongAddress => "wrong pairing address",
+                PairingFailure::Unreachable => "unreachable; check both devices are on the same network",
+            }
+        ),
+        Connection::Unreachable {
+            phone: p,
+            connect_address,
+        } => format!(
+            "phone: {} — unreachable at {connect_address}\nwake it and check both devices are on the same network; if the phone rebooted or wireless debugging was toggled, re-read the connect address from its main wireless debugging screen — do not pair again",
+            phone(p)
+        ),
+    };
+    let known = if state.known.is_empty() {
+        "known phones: none".to_string()
+    } else {
+        let mut lines = "known phones:".to_string();
+        for known in &state.known {
+            lines += &format!(
+                "\n  {} — {}",
+                phone(&known.phone),
+                match known.transport {
+                    Transport::Wired => "wired",
+                    Transport::Wireless => "wireless",
+                }
+            );
+        }
+        lines
     };
     format!(
-        "adb: {}\n{connection}\ncapture: {}",
+        "adb: {}\n{connection}\n{known}\ncapture: {}",
         if state.adb_ok { "ok" } else { "unavailable" },
         match &state.capture {
             None => "none".to_string(),

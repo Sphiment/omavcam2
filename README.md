@@ -12,13 +12,12 @@ them. See [CONTEXT.md](CONTEXT.md) for the vocabulary and
 ## Status
 
 Early. What exists today is the daemon, the socket protocol, the test harness
-everything else is built on, wired connection — plug a phone in over USB and
-`omavcam status` names it — and a capture that can be started and stopped:
+everything else is built on, wired and wireless connection, and a capture that can be started and stopped:
 `omavcam start` and the phone's camera appears in Meet's camera list. There is
 also a bar widget, so none of that needs a terminal.
 
-There is no wireless, no preview, and no settings — the capture runs at its
-defaults. Those are the next tickets.
+There is no preview or settings yet — the capture runs at its defaults. Those
+are the next tickets.
 
 ## Requirements
 
@@ -73,7 +72,12 @@ Omarchy `service` plugin, and those are QML singletons that die with the shell
 
 ```sh
 omavcam status            # print the daemon's state
+omavcam phones            # list remembered wired and wireless phones
 omavcam select <serial>   # choose which attached phone to use (bare: lists them)
+omavcam pair              # show Android's wireless-pairing steps
+omavcam pair <pair-address> <code> <connect-address>
+omavcam connect <serial> <new-connect-address>  # update a changed connect port
+omavcam forget <serial>   # remove a remembered phone
 omavcam start             # start the capture: the phone's camera becomes a webcam
 omavcam stop              # end it; omavcam disappears from camera lists again
 omavcam refresh           # re-check adb and the attached phones now
@@ -109,6 +113,31 @@ A test asserts this over the recorded argv, because an untargeted command is
 correct right up until a second phone is plugged in.
 
 See [ADR-0007](docs/adr/0007-connection-is-a-phase-not-a-precondition.md).
+
+## Wireless pairing
+
+Run `omavcam pair` for the steps. On the phone, open Developer options →
+Wireless debugging, then open **Pair device with pairing code**. That dialog's
+address and six-digit code are for pairing. The address on the main Wireless
+debugging screen is for connecting. The ports are different; omavcam asks for
+both so it cannot silently use one for the other:
+
+```sh
+omavcam pair 192.168.1.40:37123 123456 192.168.1.40:42877
+```
+
+Pairing is one-time. Later daemon starts use only `adb connect`; no cable and
+no `adb tcpip 5555` are involved. If Android changes the connect port after a
+reboot or Wireless debugging toggle, copy the new main-screen address and run:
+
+```sh
+omavcam connect <old-connect-address> <new-connect-address>
+```
+
+Do not pair again. An unreachable paired phone reports that state separately
+and names being on different networks, a sleeping phone, and a changed connect
+port as the things to check. `omavcam phones` lists remembered phones by model;
+`omavcam forget <serial>` removes one.
 
 Logs go to the journal:
 

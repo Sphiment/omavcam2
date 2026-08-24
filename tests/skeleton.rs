@@ -125,7 +125,7 @@ fn every_client_is_pushed_the_whole_state_when_it_changes() {
     assert!(state.contains_key("adb_ok"), "state is pushed whole");
     assert!(state.contains_key("connection"), "state is pushed whole");
     assert!(state.contains_key("capture"), "state is pushed whole");
-    assert_eq!(after["v"], json!(2));
+    assert_eq!(after["v"], json!(3));
 }
 
 #[test]
@@ -207,7 +207,7 @@ fn a_message_past_the_bound_is_rejected() {
     client.recv_state();
 
     let huge = "x".repeat(200 * 1024);
-    client.send_raw(&json!({"v": 2, "id": "x", "kind": huge}).to_string());
+    client.send_raw(&json!({"v": 3, "id": "x", "kind": huge}).to_string());
 
     let response = client.recv();
     assert_eq!(response["error"]["code"], json!("message_too_large"));
@@ -218,7 +218,7 @@ fn a_newline_one_byte_past_the_bound_is_rejected() {
     let f = Fixture::start();
     let mut client = f.connect();
     client.recv_state();
-    let prefix = r#"{"v":2,"id":"x","kind":""#;
+    let prefix = r#"{"v":3,"id":"x","kind":""#;
     let suffix = r#""}"#;
     let raw = format!(
         "{prefix}{}{suffix}",

@@ -68,8 +68,8 @@ _Avoid_: connection type, method
 
 **Registry**:
 The one file omavcam remembers phones in between runs: which one is selected,
-and later the phones pairing knows about. One registry, not two — a phone is
-known in exactly one place whatever transport it arrived over.
+and the phones pairing knows about. One registry, not two — a phone is known in
+exactly one place whatever transport it arrived over.
 _Avoid_: store, database, config, known devices
 
 **Pairing**:

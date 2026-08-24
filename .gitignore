@@ -5,3 +5,6 @@
 
 # Throwaway spikes: kept locally, never shipped.
 /prototypes/
+
+# Vendored third-party agent skills, restored from skills-lock.json.
+/.agents/skills/

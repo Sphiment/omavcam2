@@ -30,6 +30,13 @@ installed by cloning this repo. Both are needed: the widget is a client and
 does nothing on its own.
 
 ```sh
+# 0. Up to date, and able to build a kernel module. v4l2loopback is a DKMS
+#    module, and the kernel headers it builds against are only an *optional*
+#    dependency of dkms — pacman will not pull them in, and without them the
+#    module is never built. Match the kernel you actually run:
+#    linux-lts-headers, linux-zen-headers, linux-hardened-headers.
+sudo pacman -Syu linux-headers
+
 # 1. The engine, prebuilt by this repo's CI.
 sudo pacman -U https://github.com/Sphiment/omavcam2/releases/latest/download/omavcam-git-x86_64.pkg.tar.zst
 
@@ -43,9 +50,18 @@ systemctl --user daemon-reload && systemctl --user start omavcam.socket
 omarchy plugin add https://github.com/Sphiment/omavcam2.git --enable
 ```
 
-Then plug a phone in, accept the debugging prompt on it, and click the widget —
-or run `omavcam start`. The virtual camera appears in Meet, Zoom, OBS and
-Discord once a capture is running, and disappears again when it stops.
+`omarchy plugin add --enable` asks where in the bar to put the widget, so that
+step is interactive.
+
+On the phone, turn on **Developer options** — tap Build number seven times in
+Settings → About phone — and inside it turn on **USB debugging**. Then plug the
+phone in, accept the debugging prompt it shows, and click the widget, or run
+`omavcam start`. The virtual camera appears in Meet, Zoom, OBS and Discord once
+a capture is running, and disappears again when it stops.
+
+If `modprobe v4l2loopback` says there is no such module, the DKMS build did not
+run: `dkms status` shows whether it built for the kernel you are on, and the
+usual cause is step 0's headers being absent or for a different kernel.
 
 After the reboot nothing here needs root again: connecting to the socket is
 what starts the daemon, and the module is already loaded and labelled.

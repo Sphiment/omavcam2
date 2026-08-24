@@ -494,3 +494,27 @@ fn apply_preserves_preview_visibility_and_position() {
         line.contains("hl.dsp.window.move") && line.contains("x = 333") && line.contains("y = 222")
     }));
 }
+
+/// scrcpy's server formats the zoom range in the phone's locale, so an ar-SA
+/// phone reports Arabic-Indic digits. This is the SM-A546E's real output.
+#[test]
+fn a_phone_that_reports_its_own_digits_is_still_understood() {
+    let f = Fixture::start();
+    f.script_camera_capabilities(
+        "--camera-id=0    (back, 4080x3060, fps={15, 20, 24, 30}, zoom-range=[١, ٨])\n  - 1280x720\n",
+    );
+    f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
+    let mut client = f.connect();
+    client.await_state("camera settings", |state| {
+        state["settings"]["phone"] == json!(PIXEL)
+    });
+
+    assert_eq!(
+        client.state()["settings"]["lenses"][0]["zoom_min"],
+        json!(1.0)
+    );
+    assert_eq!(
+        client.state()["settings"]["lenses"][0]["zoom_max"],
+        json!(8.0)
+    );
+}

@@ -233,7 +233,36 @@ pub fn inspect(serial: &str) -> Result<Vec<Lens>, String> {
     parse(&text)
 }
 
+/// The camera list is printed by scrcpy's server, which runs on the phone and
+/// formats numbers in the phone's own locale: an `ar-SA` phone reports
+/// `zoom-range=[١, ٨]`, which no ASCII float parser accepts. Fold the
+/// phone's digits back to ASCII before anything tries to read them (ADR-0006).
+fn ascii_digits(text: &str) -> String {
+    // The zero of every decimal-digit block Android formats with. ponytail:
+    // a list, not a Unicode table — add a block when a phone turns one up.
+    const ZEROS: [u32; 12] = [
+        0x0660, 0x06F0, 0x0966, 0x09E6, 0x0A66, 0x0AE6, 0x0B66, 0x0BE6, 0x0C66, 0x0CE6, 0x0D66,
+        0x0E50,
+    ];
+    text.chars()
+        .map(|c| {
+            if c.is_ascii() {
+                return c;
+            }
+            if c == '\u{066B}' {
+                // Arabic decimal separator, where a fractional zoom lands.
+                return '.';
+            }
+            ZEROS
+                .iter()
+                .find_map(|zero| char::from_digit((c as u32).checked_sub(*zero)?, 10))
+                .unwrap_or(c)
+        })
+        .collect()
+}
+
 fn parse(text: &str) -> Result<Vec<Lens>, String> {
+    let text = &ascii_digits(text);
     let mut lenses = Vec::new();
     let mut current: Option<Lens> = None;
     let mut high_speed = false;

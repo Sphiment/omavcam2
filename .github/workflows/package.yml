@@ -1,0 +1,68 @@
+# Builds the Arch package on every push, and attaches it to a release when a
+# version tag is pushed. Users install that built package rather than compiling
+# omavcam themselves — the AUR is closed to new submissions, so this repo's
+# releases are the distribution.
+name: package
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # pkgver() counts commits, so a shallow clone would name the package
+          # after a history it cannot see.
+          fetch-depth: 0
+
+      # Arch in a container, not as the job's `container:`, because a container
+      # job needs node in the image to run any action at all and archlinux has
+      # none. The workspace goes in read-only and the package comes back out
+      # through out/, so nothing here rewrites the runner's own files.
+      - name: Build the package
+        run: |
+          mkdir -p out
+          docker run --rm -e GITHUB_SHA \
+            -v "$PWD:/src:ro" -v "$PWD/out:/out" \
+            archlinux:base-devel bash -eux -c '
+              pacman -Syu --noconfirm --needed git rust
+              useradd -m builder
+              # --nodeps, because building needs cargo and git only. Installing
+              # the runtime dependencies would drag v4l2loopback-dkms into a
+              # container with no kernel to build a module against; pacman
+              # still records them in the package either way.
+              cp -r /src/packaging /home/builder/build
+              chown -R builder /home/builder/build
+              su builder -c "git config --global --add safe.directory /src"
+              su builder -c "cd /home/builder/build && OMAVCAM_SOURCE=git+file:///src#commit=$GITHUB_SHA makepkg --noconfirm --nodeps"
+              cp /home/builder/build/*.pkg.tar.zst /out/
+              chmod 0644 /out/*.pkg.tar.zst
+            '
+          ls -l out/
+
+      # Every build is downloadable, so a pull request can be installed and
+      # tried before it is a release.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omavcam-git-x86_64
+          path: out/*.pkg.tar.zst
+
+      # One asset under a fixed name, so the install command in the README is a
+      # URL that never changes. The version is inside the package, which is
+      # what `pacman -Q omavcam-git` reads.
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp out/*.pkg.tar.zst "out/omavcam-git-x86_64.pkg.tar.zst"
+          gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME" || true
+          gh release upload "$GITHUB_REF_NAME" "out/omavcam-git-x86_64.pkg.tar.zst" --clobber

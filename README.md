@@ -16,21 +16,22 @@ everything else is built on, wired and wireless connection, and a capture that
 can be started and stopped: `omavcam start` makes the phone's camera appear in
 Meet's camera list. Lens, resolution, frame rate, aspect ratio and zoom can be
 staged and applied from the CLI. There is also a bar widget, so starting and
-stopping needs no terminal, and an AUR package that installs the engine and
-configures the module, so none of it has to be assembled by hand.
+stopping needs no terminal, and an Arch package — built by CI, installed from
+this repo's releases — that installs the engine and configures the module, so
+none of it has to be assembled by hand.
 
 There is no Studio yet. That is the next ticket.
 
 ## Install
 
 omavcam is two halves: the **engine** — a Rust daemon and the `omavcam` CLI,
-installed from the AUR — and the **bar widget**, an Omarchy plugin installed by
-cloning this repo. Both are needed: the widget is a client and does nothing on
-its own.
+installed as an Arch package — and the **bar widget**, an Omarchy plugin
+installed by cloning this repo. Both are needed: the widget is a client and
+does nothing on its own.
 
 ```sh
-# 1. The engine. Building takes a few minutes; it is Rust.
-yay -S omavcam-git
+# 1. The engine, prebuilt by this repo's CI.
+sudo pacman -U https://github.com/Sphiment/omavcam2/releases/latest/download/omavcam-git-x86_64.pkg.tar.zst
 
 # 2. Reboot. The package configures the module to load at boot and enables the
 #    daemon's socket for every user, and neither is picked up by a session that
@@ -48,6 +49,14 @@ Discord once a capture is running, and disappears again when it stops.
 
 After the reboot nothing here needs root again: connecting to the socket is
 what starts the daemon, and the module is already loaded and labelled.
+
+That URL always points at the newest release, and pacman pulls in the
+dependencies from its own repositories. To upgrade later, run the same command
+again — the package is not in a pacman repository, so `pacman -Syu` will not
+find a new one for you. `pacman -Q omavcam-git` says which version you have.
+
+x86_64 only: that is what the CI builds. On aarch64, build it yourself — see
+below, it is the same PKGBUILD.
 
 The package pulls in everything omavcam needs: `scrcpy`, `android-tools` for
 `adb`, `v4l-utils` for `v4l2-ctl`, `v4l2loopback-dkms` for the virtual camera
@@ -95,7 +104,7 @@ sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback
 
 ### Building it yourself
 
-No AUR helper, or working on omavcam:
+Working on omavcam, or on an architecture the CI does not build:
 
 ```sh
 git clone https://github.com/Sphiment/omavcam2.git
@@ -126,11 +135,27 @@ sudo modprobe v4l2loopback
 The binary has to be at `/usr/bin/omavcam`, because that is the path
 `omavcam.service` names.
 
+### Where the package comes from
+
+`.github/workflows/package.yml` builds the PKGBUILD in an Arch container on
+every push, so a broken package is a failed check rather than a surprise at
+install time. Pushing a `v*` tag publishes that build as a release asset under
+a fixed name, which is what the install command above downloads.
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0   # cuts a release
+```
+
+It is not an AUR package: the AUR is closed to new submissions at the moment.
+The PKGBUILD is written so it can become one unchanged — CI overrides only
+where it clones from, so that a released package is the tagged commit rather
+than whatever the default branch had drifted to.
+
 ### Uninstall
 
 ```sh
 systemctl --user stop omavcam.socket omavcam.service
-yay -Rns omavcam-git          # takes the units and the module configuration with it
+sudo pacman -Rns omavcam-git  # takes the units and the module configuration with it
 omarchy plugin remove sphiment.omavcam2
 ```
 
@@ -400,7 +425,8 @@ src/main.rs       the CLI, and the entry point for both
 manifest.json     the Omarchy plugin manifest, at the root so a clone installs
 plugin/Panel.qml  the bar widget and its panel: a client, and nothing more
 systemd/          the socket and service units
-packaging/        the AUR PKGBUILD, its install hook, and the module config
+packaging/        the PKGBUILD, its install hook, and the module config
+.github/          the workflow that builds the package and publishes releases
 tests/common/     the harness every test file is built on
 tests/            the tests, and the stub adb/scrcpy/v4l2-ctl/modprobe
 CONTEXT.md        the vocabulary; use these words, avoid the listed synonyms

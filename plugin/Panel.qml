@@ -248,7 +248,7 @@ Panel {
     if (!root.socketUp) {
       if (retry.interval === retry.firstInterval) return ""
       return "No engine answered " + root.socketPath + ".\n"
-        + "Install it:  yay -S omavcam-git\n"
+        + "Install omavcam-git: github.com/Sphiment/omavcam2 → Install\n"
         + "Already installed? systemctl --user status omavcam.socket omavcam.service"
     }
     return root.missing.map(function (item) {

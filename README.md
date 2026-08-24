@@ -14,11 +14,11 @@ them. See [CONTEXT.md](CONTEXT.md) for the vocabulary and
 Early. What exists today is the daemon, the socket protocol, the test harness
 everything else is built on, wired connection — plug a phone in over USB and
 `omavcam status` names it — and a capture that can be started and stopped:
-`omavcam start` and the phone's camera appears in Meet's camera list. There is
-also a bar widget, so none of that needs a terminal.
+`omavcam start` and the phone's camera appears in Meet's camera list. Lens,
+resolution, frame rate, aspect ratio and zoom can be staged and applied from
+the CLI. There is also a bar widget, so starting and stopping needs no terminal.
 
-There is no wireless, no preview, and no settings — the capture runs at its
-defaults. Those are the next tickets.
+There is no wireless, preview, or Studio yet. Those are the next tickets.
 
 ## Requirements
 
@@ -76,6 +76,14 @@ omavcam status            # print the daemon's state
 omavcam select <serial>   # choose which attached phone to use (bare: lists them)
 omavcam start             # start the capture: the phone's camera becomes a webcam
 omavcam stop              # end it; omavcam disappears from camera lists again
+omavcam set lens 1        # stage one or several camera settings
+omavcam set resolution 1920x1080
+omavcam set frame-rate 24
+omavcam set aspect-ratio 16:9
+omavcam set zoom 2.5
+omavcam set crop 0.1:0.1:0.8:0.8  # normalized x:y:width:height; "none" clears it
+omavcam apply             # replace a capture once, or just persist if stopped
+omavcam discard           # drop every staged change
 omavcam refresh           # re-check adb and the attached phones now
 omavcam daemon            # run the daemon in the foreground (systemd's job, normally)
 ```
@@ -119,7 +127,10 @@ journalctl --user -u omavcam.service -f
 ## The capture
 
 `omavcam start` launches one `scrcpy` against the selected phone, writing its
-camera straight to the virtual camera at 1280x720. `omavcam stop` ends it, and
+camera straight to the virtual camera with that phone's applied settings.
+Capabilities come from `scrcpy --list-camera-sizes`, so each lens exposes its
+own resolutions, frame rates and zoom bounds rather than a hardcoded menu.
+Settings are remembered per phone. `omavcam stop` ends the capture, and
 omavcam then disappears from every application's camera list — that is the
 point of `exclusive_caps=1`, not a side effect: an idle omavcam showing black
 in Meet's dropdown is what it avoids. The corollary is that omavcam is absent
@@ -136,9 +147,10 @@ scrcpy dying on its own — the phone unplugged, the process killed — moves th
 state to stopped, so the switch never claims to be on while nothing is feeding.
 An application already watching survives that: frames stop, it keeps showing its
 last one, and a restart at the **same** frame size resumes. A restart at a
-different size would freeze it permanently and silently, which is why the size
-is fixed for a capture's lifetime and why there is no resolution setting yet
-(ADR-0010).
+different size would freeze it permanently and silently, so Apply refuses
+resolution or phone-side crop changes while another application has the virtual
+camera open. Same-size changes restart safely. If the new capture fails, Apply
+relaunches the previous settings and reports what was rejected (ADR-0010).
 
 The daemon leaves `keep_format=0`: an application already reading the camera
 pins the format by itself, while an idle node must remain free to accept the

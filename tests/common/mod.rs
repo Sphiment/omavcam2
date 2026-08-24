@@ -86,6 +86,10 @@ impl Fixture {
                         "--setenv=OMAVCAM_V4L2_DIR={}",
                         self.dir.join("sys").display()
                     ),
+                    format!(
+                        "--setenv=OMAVCAM_PROC_DIR={}",
+                        self.dir.join("proc").display()
+                    ),
                     "--setenv=OMAVCAM_STARTUP_MS=500".to_string(),
                     "--setenv=OMAVCAM_COMMAND_MS=100".to_string(),
                     format!("--setenv=OMAVCAM_POLL_MS={}", self.poll_ms),
@@ -113,6 +117,7 @@ impl Fixture {
         fs::create_dir_all(&stub_dir).unwrap();
         fs::create_dir_all(&bin_dir).unwrap();
         fs::create_dir_all(dir.join("state")).unwrap();
+        fs::create_dir_all(dir.join("proc")).unwrap();
 
         let stub = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/stub");
         for tool in ["adb", "scrcpy", "v4l2-ctl", "modprobe"] {
@@ -130,6 +135,16 @@ impl Fixture {
         };
         fs::write(&fixture.log, "").unwrap();
         fixture.script_virtual_camera(Some("video42"));
+        fixture.script_camera_capabilities(
+            "    --camera-id=0    (back, 4080x3060, fps={15, 20, 24, 30}, zoom-range=[1, 8])\n\
+                 - 1920x1080\n\
+                 - 1280x720\n\
+                 - 640x480\n\
+             --camera-id=1    (front, 3264x2448, fps={15, 24, 30}, zoom-range=[1, 4])\n\
+                 - 1920x1080\n\
+                 - 1280x720\n\
+                 - 640x480\n",
+        );
         fixture
     }
 
@@ -161,6 +176,7 @@ impl Fixture {
             .env("OMAVCAM_STUB_LOG", &self.log)
             .env("OMAVCAM_STUB_DIR", &self.stub_dir)
             .env("OMAVCAM_V4L2_DIR", self.dir.join("sys"))
+            .env("OMAVCAM_PROC_DIR", self.dir.join("proc"))
             .env("OMAVCAM_STARTUP_MS", "500")
             .env("OMAVCAM_COMMAND_MS", "100")
             // The daemon polls adb for attached phones; tests should not wait a
@@ -290,6 +306,28 @@ impl Fixture {
             code.to_string(),
         )
         .unwrap();
+    }
+
+    pub fn script_fail_once(&self, tool: &str, argument: &str, code: i32) {
+        fs::write(
+            self.stub_dir.join(format!("{tool}.fail_once")),
+            format!("{code}\n{argument}"),
+        )
+        .unwrap();
+    }
+
+    pub fn script_camera_capabilities(&self, output: &str) {
+        fs::write(self.stub_dir.join("scrcpy.list.out"), output).unwrap();
+    }
+
+    pub fn script_consumer(&self, attached: bool) {
+        let process = self.dir.join("proc/999");
+        let _ = fs::remove_dir_all(&process);
+        if attached {
+            let fd = process.join("fd");
+            fs::create_dir_all(&fd).unwrap();
+            std::os::unix::fs::symlink("/dev/video42", fd.join("3")).unwrap();
+        }
     }
 
     /// What `adb devices -l` prints from now on: one `(serial, adb's word for

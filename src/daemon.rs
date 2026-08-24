@@ -19,6 +19,7 @@ use crate::protocol::{
     error_message, ok_message, socket_path, state_message, Capture, Connection, State, MAX_MESSAGE,
     VERSION,
 };
+use crate::settings::{self, CameraSettings, SettingsState};
 use crate::{capture, command, protocol};
 
 /// How often the daemon asks adb what is attached. adb has no way to tell us —
@@ -161,6 +162,15 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
         // If it did not answer we stay in Connecting and the next pass tries
         // again — a phone that is booting or half-asleep needs no error.
     }
+    let connected = shared.lock().unwrap().state.connection.clone();
+    if let Connection::Connected { phone } = connected {
+        if let Err(error) = ensure_settings_locked(shared, &phone.serial) {
+            eprintln!(
+                "omavcam: could not inspect {}'s cameras: {error}",
+                phone.name
+            );
+        }
+    }
     true
 }
 
@@ -182,6 +192,68 @@ fn publish_capture(shared: &Shared, capture: Option<Capture>) {
     publish(shared, state);
 }
 
+fn publish_settings(shared: &Shared, settings: SettingsState) {
+    let state = State {
+        settings: Some(settings),
+        ..shared.lock().unwrap().state.clone()
+    };
+    publish(shared, state);
+}
+
+/// Load the connected phone's capabilities once, then pair them with that
+/// phone's persisted settings. A phone switch replaces the whole settings
+/// state; lens ids never leak between phones.
+fn ensure_settings_locked(shared: &Shared, serial: &str) -> Result<(), String> {
+    if shared
+        .lock()
+        .unwrap()
+        .state
+        .settings
+        .as_ref()
+        .is_some_and(|settings| settings.phone == serial)
+    {
+        return Ok(());
+    }
+    let saved = shared
+        .lock()
+        .unwrap()
+        .registry
+        .settings
+        .get(serial)
+        .cloned();
+    let lenses = settings::inspect(serial)?;
+    publish_settings(
+        shared,
+        SettingsState::new(serial.to_string(), lenses, saved),
+    );
+    Ok(())
+}
+
+fn persist_settings(
+    shared: &Shared,
+    serial: &str,
+    settings: CameraSettings,
+) -> std::io::Result<()> {
+    let (state_dir, registry, previous) = {
+        let mut inner = shared.lock().unwrap();
+        let previous = inner.registry.settings.insert(serial.to_string(), settings);
+        (inner.state_dir.clone(), inner.registry.clone(), previous)
+    };
+    if let Err(error) = phones::save(&state_dir, &registry) {
+        let mut inner = shared.lock().unwrap();
+        match previous {
+            Some(settings) => {
+                inner.registry.settings.insert(serial.to_string(), settings);
+            }
+            None => {
+                inner.registry.settings.remove(serial);
+            }
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Launch a capture against the connected phone. Returns the error code and
 /// message for a client, or nothing when it started.
 fn start_capture(shared: &Shared, stay_awake: bool) -> Result<(), (&'static str, String)> {
@@ -200,12 +272,23 @@ fn start_capture(shared: &Shared, stay_awake: bool) -> Result<(), (&'static str,
         Connection::Connected { phone } => phone,
         other => return Err(("no_phone", refusal_reason(&other))),
     };
+    ensure_settings_locked(shared, &phone.serial)
+        .map_err(|error| ("capabilities_failed", error))?;
+    let settings = shared
+        .lock()
+        .unwrap()
+        .state
+        .settings
+        .as_ref()
+        .expect("settings were ensured")
+        .applied
+        .clone();
     // The node is only looked up, never loaded: a `systemd --user` service has
     // no capabilities to load a module with (ADR-0008).
     let node = capture::find_node().map_err(|e| ("no_virtual_camera", e))?;
     capture::set_controls(&node);
 
-    match capture::spawn(&phone.serial, &node, stay_awake) {
+    match capture::spawn(&phone.serial, &node, stay_awake, &settings) {
         Ok(child) => {
             shared.lock().unwrap().capture = Some(child);
             publish_capture(
@@ -213,7 +296,7 @@ fn start_capture(shared: &Shared, stay_awake: bool) -> Result<(), (&'static str,
                 Some(Capture {
                     phone,
                     node,
-                    size: capture::SIZE.to_string(),
+                    size: settings::output_size(&settings),
                     stay_awake,
                 }),
             );
@@ -345,6 +428,195 @@ fn select_phone(shared: &Shared, serial: &str) -> Result<(), (&'static str, Stri
     remember_selection(shared, serial.to_string());
     refresh_connection_locked(shared);
     Ok(())
+}
+
+fn set_setting(shared: &Shared, name: &str, value: &Value) -> Result<(), (&'static str, String)> {
+    let _turn = transition();
+    if !refresh_connection_locked(shared) {
+        return Err(("adb_unavailable", "adb devices failed".to_string()));
+    }
+    let phone = match shared.lock().unwrap().state.connection.clone() {
+        Connection::Connected { phone } => phone,
+        other => return Err(("no_phone", refusal_reason(&other))),
+    };
+    ensure_settings_locked(shared, &phone.serial)
+        .map_err(|error| ("capabilities_failed", error))?;
+    let mut settings = shared
+        .lock()
+        .unwrap()
+        .state
+        .settings
+        .clone()
+        .expect("settings were ensured");
+    settings
+        .change(name, value)
+        .map_err(|error| ("invalid_setting", error))?;
+    publish_settings(shared, settings);
+    Ok(())
+}
+
+fn discard_settings(shared: &Shared) -> Result<(), (&'static str, String)> {
+    let _turn = transition();
+    let mut settings = shared.lock().unwrap().state.settings.clone().ok_or((
+        "no_phone",
+        "no connected phone has camera settings".to_string(),
+    ))?;
+    settings.discard();
+    publish_settings(shared, settings);
+    Ok(())
+}
+
+fn apply_settings(shared: &Shared) -> Result<(), (&'static str, String)> {
+    let _turn = transition();
+    if !refresh_connection_locked(shared) {
+        return Err(("adb_unavailable", "adb devices failed".to_string()));
+    }
+    reap_capture_locked(shared);
+    let phone = match shared.lock().unwrap().state.connection.clone() {
+        Connection::Connected { phone } => phone,
+        other => return Err(("no_phone", refusal_reason(&other))),
+    };
+    ensure_settings_locked(shared, &phone.serial)
+        .map_err(|error| ("capabilities_failed", error))?;
+    let mut view = shared
+        .lock()
+        .unwrap()
+        .state
+        .settings
+        .clone()
+        .expect("settings were ensured");
+    if !view.has_pending_changes {
+        return Ok(());
+    }
+
+    let running = {
+        let inner = shared.lock().unwrap();
+        inner
+            .state
+            .capture
+            .clone()
+            .zip(inner.capture.as_ref().map(Child::id))
+    };
+    if let Some((capture_state, writer_pid)) = &running {
+        let size_changes =
+            settings::output_size(&view.pending) != settings::output_size(&view.applied);
+        let has_consumer = size_changes
+            .then(|| capture::has_consumer(&capture_state.node, *writer_pid))
+            .transpose()
+            .map_err(|error| {
+                (
+                    "consumer_check_failed",
+                    format!(
+                        "could not inspect who is using {}: {error}",
+                        capture_state.node
+                    ),
+                )
+            })?
+            .unwrap_or(false);
+        if has_consumer {
+            let message = format!(
+                "{} is in use; close the application using it before changing frame size from {} to {}",
+                capture_state.node,
+                settings::output_size(&view.applied),
+                settings::output_size(&view.pending)
+            );
+            view.note_rejection(message.clone());
+            publish_settings(shared, view);
+            return Err(("camera_in_use", message));
+        }
+    }
+
+    let previous = view.applied.clone();
+    let pending = view.pending.clone();
+    persist_settings(shared, &phone.serial, pending.clone()).map_err(|error| {
+        (
+            "settings_not_saved",
+            format!("could not save settings: {error}"),
+        )
+    })?;
+
+    let Some((capture_state, _)) = running else {
+        view.applied();
+        publish_settings(shared, view);
+        return Ok(());
+    };
+
+    let child = shared.lock().unwrap().capture.take();
+    if let Some(mut child) = child {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    match capture::spawn(
+        &phone.serial,
+        &capture_state.node,
+        capture_state.stay_awake,
+        &pending,
+    ) {
+        Ok(child) => {
+            shared.lock().unwrap().capture = Some(child);
+            view.applied();
+            let state = State {
+                capture: Some(Capture {
+                    phone,
+                    node: capture_state.node,
+                    size: settings::output_size(&pending),
+                    stay_awake: capture_state.stay_awake,
+                }),
+                settings: Some(view),
+                ..shared.lock().unwrap().state.clone()
+            };
+            publish(shared, state);
+            Ok(())
+        }
+        Err(error) => {
+            let rejected = format!("{} ({error})", serde_json::to_string(&pending).unwrap());
+            let persistence_error = persist_settings(shared, &phone.serial, previous.clone()).err();
+            match capture::spawn(
+                &phone.serial,
+                &capture_state.node,
+                capture_state.stay_awake,
+                &previous,
+            ) {
+                Ok(child) => {
+                    shared.lock().unwrap().capture = Some(child);
+                    let message = match persistence_error {
+                        Some(ref error) => format!(
+                            "scrcpy rejected {rejected}; previous capture restarted, but its settings could not be restored on disk: {error}"
+                        ),
+                        None => format!("scrcpy rejected {rejected}; previous capture restarted"),
+                    };
+                    view.reject(message.clone());
+                    let state = State {
+                        capture: Some(capture_state),
+                        settings: Some(view),
+                        ..shared.lock().unwrap().state.clone()
+                    };
+                    publish(shared, state);
+                    Err((
+                        if persistence_error.is_some() {
+                            "rollback_failed"
+                        } else {
+                            "capture_failed"
+                        },
+                        message,
+                    ))
+                }
+                Err(rollback_error) => {
+                    let message = format!(
+                        "scrcpy rejected {rejected}; restarting the previous capture also failed: {rollback_error}"
+                    );
+                    view.reject(message.clone());
+                    let state = State {
+                        capture: None,
+                        settings: Some(view),
+                        ..shared.lock().unwrap().state.clone()
+                    };
+                    publish(shared, state);
+                    Err(("rollback_failed", message))
+                }
+            }
+        }
+    }
 }
 
 /// Systemd hands the listening socket in on fd 3 when it activates us;
@@ -545,6 +817,22 @@ fn handle(shared: &Shared, line: &[u8]) -> String {
                 Err((code, message)) => error_message(&id, current_rev(), code, &message),
             }
         }
+        Some("set") => {
+            let setting = request.get("setting").and_then(Value::as_str).unwrap_or("");
+            let value = request.get("value").unwrap_or(&Value::Null);
+            match set_setting(shared, setting, value) {
+                Ok(()) => ok_message(&id, current_rev()),
+                Err((code, message)) => error_message(&id, current_rev(), code, &message),
+            }
+        }
+        Some("apply") => match apply_settings(shared) {
+            Ok(()) => ok_message(&id, current_rev()),
+            Err((code, message)) => error_message(&id, current_rev(), code, &message),
+        },
+        Some("discard") => match discard_settings(shared) {
+            Ok(()) => ok_message(&id, current_rev()),
+            Err((code, message)) => error_message(&id, current_rev(), code, &message),
+        },
         Some("start") => match start_capture(
             shared,
             request

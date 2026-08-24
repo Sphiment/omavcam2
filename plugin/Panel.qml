@@ -124,12 +124,36 @@ Panel {
     link.item.flush()
   }
 
+  // Phone names, serials and the tool errors quoted back in refusals are all
+  // written by the device, and every Text in the shell's shared components is
+  // Text.AutoText — Qt decides on its own whether a string is markup. A model
+  // name of "<img src=…>" would then be a phone deciding what the bar renders
+  // and what it fetches. Stripping the angle brackets is what makes that
+  // decision impossible; nothing Qt calls rich text survives without them.
+  //
+  // Done here, where the daemon's words enter, because it is the only door:
+  // the Texts below can be told to stay plain, but PanelHero, Toggle and
+  // Button belong to the shell and cannot.
+  function plain(value) {
+    if (typeof value === "string") return value.replace(/[<>]/g, "")
+    if (Array.isArray(value)) return value.map(root.plain)
+    if (value && typeof value === "object") {
+      var copy = {}
+      Object.keys(value).forEach(function(key) { copy[key] = root.plain(value[key]) })
+      return copy
+    }
+    return value
+  }
+
   function receive(line) {
     var message
     // The socket is the daemon's and mode 0600, but a line we cannot parse
     // must not take the widget down with it.
     try {
-      message = JSON.parse(line)
+      // Sanitised after parsing, not before: what reaches a Text is the decoded
+      // string, and an encoder that escaped the brackets would slip a raw line
+      // past a check made on the raw line.
+      message = plain(JSON.parse(line))
     } catch (e) {
       return
     }
@@ -307,6 +331,7 @@ Panel {
         spacing: Style.space(8)
 
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           text: "Reconnecting…"
           color: root.foreground
@@ -317,6 +342,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           text: root.capturing ? root.daemonState.capture.phone.name + " · camera stays selected" : ""
           color: Color.muted
@@ -423,6 +449,7 @@ Panel {
           // One line explains every dimmed row, and warns about the one
           // click in this panel that takes something away.
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             text: root.pickerNote()
             visible: text !== ""
@@ -458,6 +485,7 @@ Panel {
 
         // ---------- what the daemon refused ----------
         Text {
+          textFormat: Text.PlainText
           width: parent.width
           visible: root.refusal !== ""
           text: root.refusal

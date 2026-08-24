@@ -140,3 +140,39 @@ fn the_panel_toggles_the_preview_with_the_omarchy_theme_tokens() {
         "the reconnect warning uses the ordinary capture color"
     );
 }
+
+/// Phone names, serials and the tool errors quoted back in refusals are all
+/// written by the device, and the shell's shared components render text as
+/// `Text.AutoText` — Qt decides for itself whether a string is markup. So the
+/// plugin must not hand a device's angle brackets on: a model name of
+/// `<img src="http://evil/x">` would otherwise be a phone choosing what the bar
+/// renders and what it fetches.
+///
+/// Two halves, and the first is the one that matters, because `PanelHero`,
+/// `Toggle` and `Button` belong to the shell and cannot be told to stay plain.
+#[test]
+fn nothing_a_phone_wrote_can_become_markup() {
+    for (path, code) in plugin_code() {
+        let name = path.display();
+
+        // The daemon's every word is sanitised as it is parsed.
+        if code.contains("JSON.parse") {
+            assert!(
+                code.contains("plain(JSON.parse(line))"),
+                "{name}: the daemon's state must be sanitised where it is parsed"
+            );
+            assert!(
+                code.contains(r#"replace(/[<>]/g, "")"#),
+                "{name}: sanitising is stripping the brackets Qt reads as markup"
+            );
+        }
+
+        // And every Text this plugin owns says plainly that it is plain.
+        let owned = code.matches("Text {").count();
+        let pinned = code.matches("textFormat: Text.PlainText").count();
+        assert_eq!(
+            owned, pinned,
+            "{name}: {owned} Text elements but {pinned} pinned to PlainText"
+        );
+    }
+}

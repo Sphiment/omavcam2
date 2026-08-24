@@ -1233,17 +1233,23 @@ fn update_connect_address(
             );
             ("unreachable", unreachable_message().to_string())
         })?;
-    let stable_id = phones::stable_id(connect_address).ok_or_else(|| {
-        (
-            "phone_identity_failed",
-            "could not verify that the new connect address belongs to the paired phone".to_string(),
-        )
-    })?;
+    let stable_id = match phones::stable_id(connect_address) {
+        Some(stable_id) => stable_id,
+        None => {
+            phones::disconnect_wireless(connect_address);
+            return Err((
+                "phone_identity_failed",
+                "could not verify that the new connect address belongs to the paired phone"
+                    .to_string(),
+            ));
+        }
+    };
     if known
         .hardware_id
         .as_deref()
         .is_some_and(|expected| expected != stable_id)
     {
+        phones::disconnect_wireless(connect_address);
         return Err((
             "wrong_phone",
             "the new connect address belongs to a different phone; selection was not changed"
@@ -1271,6 +1277,9 @@ fn update_connect_address(
             inner.registry.selected.as_deref().is_some_and(same_phone),
         )
     };
+    if capture_uses_old_address {
+        stop_capture_locked(shared);
+    }
     let phone = remember_wireless(
         shared,
         connect_address,
@@ -1279,9 +1288,6 @@ fn update_connect_address(
         Some(serial),
         was_selected,
     );
-    if capture_uses_old_address {
-        stop_capture_locked(shared);
-    }
     if was_selected {
         publish_connection(shared, Connection::Connecting { phone }, listed);
     }

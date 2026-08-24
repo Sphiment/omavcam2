@@ -391,6 +391,8 @@ fn a_paired_phone_with_a_changed_port_is_unreachable_then_reconnected_without_pa
         json!(true)
     );
     assert_eq!(client.request("apply")["ok"], json!(true));
+    f.script_hold("scrcpy");
+    assert_eq!(client.request("start")["ok"], json!(true));
 
     f.script_devices(&[]);
     f.script_exit_for("adb", "connect", 1);
@@ -399,6 +401,8 @@ fn a_paired_phone_with_a_changed_port_is_unreachable_then_reconnected_without_pa
     let status = String::from_utf8(f.cli(&["status"]).stdout).unwrap();
     assert!(status.contains("same network"), "{status}");
     assert!(status.contains("do not pair again"), "{status}");
+    let mut observer = f.connect();
+    observer.recv_state();
 
     f.script_exit_for("adb", "connect", 0);
     f.script_devices_on_connect(&[(NEW_CONNECT_ADDRESS, "device", Some("Pixel_7"))]);
@@ -408,6 +412,12 @@ fn a_paired_phone_with_a_changed_port_is_unreachable_then_reconnected_without_pa
     );
 
     assert_eq!(response["ok"], json!(true), "{response}");
+    let stopped = observer.recv_state();
+    assert_eq!(stopped["state"]["capture"], json!(null));
+    assert_eq!(
+        stopped["state"]["known"][0]["phone"]["serial"],
+        json!(CONNECT_ADDRESS)
+    );
     assert_eq!(client.state()["connection"]["state"], json!("connected"));
     assert_eq!(client.state()["settings"]["applied"]["zoom"], json!(2.0));
     assert_eq!(
@@ -915,10 +925,24 @@ fn a_provisional_phone_id_survives_late_identity_and_port_discovery() {
         .to_string();
     assert_eq!(provisional, CONNECT_ADDRESS);
 
-    f.script_exit_for("adb", "shell", 0);
-    f.script_output_for("adb", "shell", &format!("{STABLE_ID}\n"));
     f.script_devices(&[]);
     f.script_devices_on_connect(&[(NEW_CONNECT_ADDRESS, "device", Some("Pixel_7"))]);
+    let response = client.request_with(
+        "connect",
+        json!({"serial": CONNECT_ADDRESS, "connect_address": NEW_CONNECT_ADDRESS}),
+    );
+    assert_eq!(response["error"]["code"], json!("phone_identity_failed"));
+    assert!(f
+        .argv()
+        .iter()
+        .any(|call| call == &format!("adb disconnect {NEW_CONNECT_ADDRESS}")));
+    assert_eq!(
+        client.state()["known"][0]["phone"]["serial"],
+        json!(CONNECT_ADDRESS)
+    );
+
+    f.script_exit_for("adb", "shell", 0);
+    f.script_output_for("adb", "shell", &format!("{STABLE_ID}\n"));
     let response = client.request_with(
         "connect",
         json!({"serial": CONNECT_ADDRESS, "connect_address": NEW_CONNECT_ADDRESS}),
@@ -1089,6 +1113,10 @@ fn a_changed_port_cannot_retarget_capture_to_a_different_phone() {
         client.state()["known"][0]["phone"]["serial"],
         json!(CONNECT_ADDRESS)
     );
+    assert!(f
+        .argv()
+        .iter()
+        .any(|call| call == &format!("adb disconnect {NEW_CONNECT_ADDRESS}")));
     assert_eq!(f.await_argv("scrcpy", 1).len(), 1);
 }
 

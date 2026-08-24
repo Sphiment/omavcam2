@@ -482,7 +482,6 @@ fn the_current_connect_address_is_an_idempotent_no_op() {
     );
 }
 
-
 #[test]
 fn a_rejected_new_address_is_disconnected_after_post_connect_failures() {
     let f = Fixture::slow_poll();
@@ -539,7 +538,6 @@ fn a_rejected_new_address_is_disconnected_after_post_connect_failures() {
     );
 }
 
-
 #[test]
 fn a_changed_wireless_port_retargets_the_same_logical_capture() {
     let f = Fixture::slow_poll();
@@ -595,7 +593,6 @@ fn a_changed_wireless_port_retargets_the_same_logical_capture() {
         1
     );
 }
-
 
 #[test]
 fn a_changed_port_cannot_retarget_capture_to_a_different_phone_while_reconnecting() {

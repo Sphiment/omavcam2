@@ -373,7 +373,8 @@ fn a_paired_phone_with_a_changed_port_is_unreachable_then_reconnected_without_pa
     f.script_output_for("adb", "pair", "Successfully paired\n");
     f.script_output_for("adb", "connect", "connected\n");
     f.script_output_for("adb", "shell", &format!("{STABLE_ID}\n"));
-    f.script_devices(&[(CONNECT_ADDRESS, "device", Some("Pixel_7"))]);
+    f.script_devices(&[]);
+    f.script_devices_on_connect(&[(CONNECT_ADDRESS, "device", Some("Pixel_7"))]);
     assert_eq!(
         client.request_with(
             "pair",
@@ -414,7 +415,8 @@ fn a_paired_phone_with_a_changed_port_is_unreachable_then_reconnected_without_pa
         json!(NEW_CONNECT_ADDRESS)
     );
     assert_eq!(client.state()["known"].as_array().unwrap().len(), 1);
-    assert_eq!(client.state()["known"][0]["id"], json!(STABLE_ID));
+    assert_eq!(client.state()["known"][0]["id"], json!(CONNECT_ADDRESS));
+    assert_eq!(client.state()["known"][0]["hardware_id"], json!(STABLE_ID));
     assert_eq!(
         client.state()["known"][0]["phone"]["name"],
         json!("Pixel 7")
@@ -493,7 +495,7 @@ fn a_changed_wireless_port_retargets_the_same_logical_capture() {
 }
 
 #[test]
-fn a_changed_port_cannot_retarget_capture_to_a_different_phone() {
+fn a_changed_port_cannot_retarget_capture_to_a_different_phone_while_reconnecting() {
     let f = Fixture::slow_poll();
     let mut client = f.connect();
     f.script_hold("scrcpy");
@@ -780,4 +782,343 @@ fn connect_output_alone_does_not_make_an_absent_phone_connected() {
         "{response}"
     );
     assert_eq!(client.state()["connection"]["state"], json!("unreachable"));
+}
+
+#[test]
+fn a_failed_scan_after_connect_is_reported_as_adb_unavailable() {
+    let f = Fixture::slow_poll();
+    let mut client = f.connect();
+    f.script_output_for("adb", "pair", "Successfully paired\n");
+    f.script_output_for("adb", "connect", "connected\n");
+    f.script_exit_for("adb", "devices", 1);
+
+    let response = client.request_with(
+        "pair",
+        json!({
+            "pair_address": PAIR_ADDRESS,
+            "code": CODE,
+            "connect_address": CONNECT_ADDRESS,
+        }),
+    );
+
+    assert_eq!(response["error"]["code"], json!("adb_unavailable"));
+    assert_eq!(client.state()["adb_ok"], json!(false));
+    assert_eq!(client.state()["connection"]["state"], json!("no_phone"));
+    assert_eq!(client.state()["known"].as_array().unwrap().len(), 1);
+    assert_eq!(client.state()["known"][0]["id"], json!(CONNECT_ADDRESS));
+}
+
+#[test]
+fn an_offline_known_wireless_phone_uses_transport_recovery() {
+    let f = Fixture::slow_poll();
+    let mut client = f.connect();
+    f.script_output_for("adb", "pair", "Successfully paired\n");
+    f.script_output_for("adb", "connect", "connected\n");
+    f.script_output_for("adb", "shell", &format!("{STABLE_ID}\n"));
+    f.script_devices(&[(CONNECT_ADDRESS, "device", Some("Pixel_7"))]);
+    assert_eq!(
+        client.request_with(
+            "pair",
+            json!({
+                "pair_address": PAIR_ADDRESS,
+                "code": CODE,
+                "connect_address": CONNECT_ADDRESS,
+            }),
+        )["ok"],
+        json!(true)
+    );
+    let connects_before = f
+        .argv()
+        .iter()
+        .filter(|call| call == &&format!("adb connect {CONNECT_ADDRESS}"))
+        .count();
+    f.script_devices(&[(CONNECT_ADDRESS, "offline", Some("Pixel_7"))]);
+    f.script_exit_for("adb", "connect", 1);
+
+    client.request("refresh");
+
+    assert_eq!(client.state()["connection"]["state"], json!("unreachable"));
+    assert!(
+        f.argv()
+            .iter()
+            .filter(|call| call == &&format!("adb connect {CONNECT_ADDRESS}"))
+            .count()
+            > connects_before,
+        "offline recovery never ran adb connect: {:?}",
+        f.argv()
+    );
+}
+
+#[test]
+fn automatic_recovery_rejects_a_different_phone_at_the_saved_endpoint() {
+    let f = Fixture::slow_poll();
+    let mut client = f.connect();
+    f.script_output_for("adb", "pair", "Successfully paired\n");
+    f.script_output_for("adb", "connect", "connected\n");
+    f.script_output_for("adb", "shell", &format!("{STABLE_ID}\n"));
+    f.script_devices(&[(CONNECT_ADDRESS, "device", Some("Pixel_7"))]);
+    assert_eq!(
+        client.request_with(
+            "pair",
+            json!({
+                "pair_address": PAIR_ADDRESS,
+                "code": CODE,
+                "connect_address": CONNECT_ADDRESS,
+            }),
+        )["ok"],
+        json!(true)
+    );
+
+    f.script_devices(&[]);
+    f.script_devices_on_connect(&[(CONNECT_ADDRESS, "device", Some("Galaxy_S21"))]);
+    f.script_output_for("adb", "shell", "A_DIFFERENT_PHONE\n");
+    client.request("refresh");
+    // Even if adb still lists an endpoint after disconnect, the normal resolve
+    // path must not bypass the identity check on its next pass.
+    client.request("refresh");
+
+    assert_eq!(client.state()["connection"]["state"], json!("unreachable"));
+    assert_eq!(client.state()["known"][0]["hardware_id"], json!(STABLE_ID));
+    assert_eq!(
+        client.state()["known"][0]["phone"]["name"],
+        json!("Pixel 7")
+    );
+    assert!(f
+        .argv()
+        .iter()
+        .any(|call| call == &format!("adb disconnect {CONNECT_ADDRESS}")));
+}
+
+#[test]
+fn a_provisional_phone_id_survives_late_identity_and_port_discovery() {
+    let f = Fixture::slow_poll();
+    let mut client = f.connect();
+    f.script_output_for("adb", "pair", "Successfully paired\n");
+    f.script_output_for("adb", "connect", "connected\n");
+    f.script_exit_for("adb", "shell", 1);
+    f.script_devices(&[]);
+    f.script_devices_on_connect(&[(CONNECT_ADDRESS, "device", Some("Pixel_7"))]);
+    assert_eq!(
+        client.request_with(
+            "pair",
+            json!({
+                "pair_address": PAIR_ADDRESS,
+                "code": CODE,
+                "connect_address": CONNECT_ADDRESS,
+            }),
+        )["ok"],
+        json!(true)
+    );
+    let provisional = client.state()["known"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(provisional, CONNECT_ADDRESS);
+
+    f.script_exit_for("adb", "shell", 0);
+    f.script_output_for("adb", "shell", &format!("{STABLE_ID}\n"));
+    f.script_devices(&[]);
+    f.script_devices_on_connect(&[(NEW_CONNECT_ADDRESS, "device", Some("Pixel_7"))]);
+    let response = client.request_with(
+        "connect",
+        json!({"serial": CONNECT_ADDRESS, "connect_address": NEW_CONNECT_ADDRESS}),
+    );
+
+    assert_eq!(response["ok"], json!(true), "{response}");
+    assert_eq!(client.state()["known"][0]["id"], json!(provisional));
+    assert_eq!(client.state()["known"][0]["hardware_id"], json!(STABLE_ID));
+    assert_eq!(
+        client.state()["known"][0]["connect_address"],
+        json!(NEW_CONNECT_ADDRESS)
+    );
+
+    f.script_devices(&[(STABLE_ID, "device", Some("Pixel_7"))]);
+    assert_eq!(
+        client.request_with("select", json!({"serial": STABLE_ID}))["ok"],
+        json!(true)
+    );
+    assert_eq!(client.state()["known"].as_array().unwrap().len(), 1);
+    assert_eq!(client.state()["known"][0]["id"], json!(provisional));
+}
+
+#[test]
+fn late_identity_merges_a_provisional_wireless_and_existing_wired_record() {
+    let f = Fixture::slow_poll();
+    let mut client = f.connect();
+    f.script_devices(&[(STABLE_ID, "device", Some("Pixel_7"))]);
+    client.request("refresh");
+    client.await_state("the wired phone", |state| {
+        state["connection"]["state"] == json!("connected")
+    });
+    client.request("begin_pairing");
+
+    f.script_output_for("adb", "pair", "Successfully paired\n");
+    f.script_output_for("adb", "connect", "connected\n");
+    f.script_exit_for("adb", "shell", 1);
+    f.script_devices_on_connect(&[(CONNECT_ADDRESS, "device", Some("Pixel_7"))]);
+    assert_eq!(
+        client.request_with(
+            "pair",
+            json!({
+                "pair_address": PAIR_ADDRESS,
+                "code": CODE,
+                "connect_address": CONNECT_ADDRESS,
+            }),
+        )["ok"],
+        json!(true)
+    );
+    assert_eq!(client.state()["known"].as_array().unwrap().len(), 2);
+
+    f.script_devices(&[(STABLE_ID, "device", Some("Pixel_7"))]);
+    assert_eq!(
+        client.request_with("select", json!({"serial": STABLE_ID}))["ok"],
+        json!(true)
+    );
+    assert_eq!(client.state()["known"].as_array().unwrap().len(), 2);
+
+    f.script_exit_for("adb", "shell", 0);
+    f.script_output_for("adb", "shell", &format!("{STABLE_ID}\n"));
+    f.script_devices_on_connect(&[(NEW_CONNECT_ADDRESS, "device", Some("Pixel_7"))]);
+    let response = client.request_with(
+        "connect",
+        json!({"serial": CONNECT_ADDRESS, "connect_address": NEW_CONNECT_ADDRESS}),
+    );
+
+    assert_eq!(response["ok"], json!(true), "{response}");
+    assert_eq!(client.state()["known"].as_array().unwrap().len(), 1);
+    assert_eq!(client.state()["known"][0]["id"], json!(STABLE_ID));
+    assert_eq!(client.state()["known"][0]["hardware_id"], json!(STABLE_ID));
+    assert_eq!(
+        client.state()["known"][0]["phone"]["serial"],
+        json!(NEW_CONNECT_ADDRESS)
+    );
+    assert_eq!(
+        client.state()["connection"]["phone"]["serial"],
+        json!(NEW_CONNECT_ADDRESS)
+    );
+}
+
+#[test]
+fn updating_an_unselected_phone_does_not_repoint_the_capture() {
+    let f = Fixture::slow_poll();
+    let mut client = f.connect();
+    f.script_hold("scrcpy");
+    f.script_output_for("adb", "pair", "Successfully paired\n");
+    f.script_output_for("adb", "connect", "connected\n");
+    f.script_output_for("adb", "shell", &format!("{STABLE_ID}\n"));
+    f.script_devices(&[(CONNECT_ADDRESS, "device", Some("Pixel_7"))]);
+    client.request_with(
+        "pair",
+        json!({
+            "pair_address": PAIR_ADDRESS,
+            "code": CODE,
+            "connect_address": CONNECT_ADDRESS,
+        }),
+    );
+    f.script_devices(&[
+        (CONNECT_ADDRESS, "device", Some("Pixel_7")),
+        (WIRED, "device", Some("Galaxy_S21")),
+    ]);
+    assert_eq!(
+        client.request_with("select", json!({"serial": WIRED}))["ok"],
+        json!(true)
+    );
+    assert_eq!(client.request("start")["ok"], json!(true));
+
+    f.script_devices_on_connect(&[
+        (NEW_CONNECT_ADDRESS, "device", Some("Pixel_7")),
+        (WIRED, "device", Some("Galaxy_S21")),
+    ]);
+    let response = client.request_with(
+        "connect",
+        json!({"serial": CONNECT_ADDRESS, "connect_address": NEW_CONNECT_ADDRESS}),
+    );
+
+    assert_eq!(response["ok"], json!(true), "{response}");
+    assert_eq!(
+        client.state()["connection"]["phone"]["serial"],
+        json!(WIRED)
+    );
+    assert_eq!(client.state()["capture"]["phone"]["serial"], json!(WIRED));
+    assert_eq!(f.await_argv("scrcpy", 1).len(), 1);
+    assert!(client.state()["known"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|known| {
+            known["phone"]["serial"] == json!(NEW_CONNECT_ADDRESS)
+                && known["hardware_id"] == json!(STABLE_ID)
+        }));
+}
+
+#[test]
+fn a_changed_port_cannot_retarget_capture_to_a_different_phone() {
+    let f = Fixture::slow_poll();
+    let mut client = f.connect();
+    f.script_hold("scrcpy");
+    f.script_output_for("adb", "pair", "Successfully paired\n");
+    f.script_output_for("adb", "connect", "connected\n");
+    f.script_output_for("adb", "shell", &format!("{STABLE_ID}\n"));
+    f.script_devices(&[(CONNECT_ADDRESS, "device", Some("Pixel_7"))]);
+    assert_eq!(
+        client.request_with(
+            "pair",
+            json!({
+                "pair_address": PAIR_ADDRESS,
+                "code": CODE,
+                "connect_address": CONNECT_ADDRESS,
+            }),
+        )["ok"],
+        json!(true)
+    );
+    assert_eq!(client.request("start")["ok"], json!(true));
+
+    f.script_devices_on_connect(&[(NEW_CONNECT_ADDRESS, "device", Some("Galaxy_S21"))]);
+    f.script_output_for("adb", "shell", "A_DIFFERENT_PHONE\n");
+    let response = client.request_with(
+        "connect",
+        json!({"serial": CONNECT_ADDRESS, "connect_address": NEW_CONNECT_ADDRESS}),
+    );
+
+    assert_eq!(response["error"]["code"], json!("wrong_phone"));
+    assert_eq!(
+        client.state()["capture"]["phone"]["serial"],
+        json!(CONNECT_ADDRESS)
+    );
+    assert_eq!(
+        client.state()["known"][0]["phone"]["serial"],
+        json!(CONNECT_ADDRESS)
+    );
+    assert_eq!(f.await_argv("scrcpy", 1).len(), 1);
+}
+
+#[test]
+fn selecting_an_absent_known_wired_phone_does_not_stop_the_capture() {
+    let f = Fixture::slow_poll();
+    let mut client = f.connect();
+    f.script_devices(&[
+        (STABLE_ID, "device", Some("Pixel_7")),
+        (WIRED, "device", Some("Galaxy_S21")),
+    ]);
+    assert_eq!(
+        client.request_with("select", json!({"serial": WIRED}))["ok"],
+        json!(true)
+    );
+    assert_eq!(
+        client.request_with("select", json!({"serial": STABLE_ID}))["ok"],
+        json!(true)
+    );
+    f.script_devices(&[(STABLE_ID, "device", Some("Pixel_7"))]);
+    client.request("refresh");
+    f.script_hold("scrcpy");
+    assert_eq!(client.request("start")["ok"], json!(true));
+
+    let output = f.cli(&["select", WIRED]);
+    client.request("status");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        client.state()["capture"]["phone"]["serial"],
+        json!(STABLE_ID)
+    );
 }

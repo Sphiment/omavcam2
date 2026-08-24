@@ -127,11 +127,16 @@ pub enum Transport {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KnownPhone {
-    /// Durable identity for per-phone settings. A provisional wireless entry
-    /// starts with its endpoint here; learning the device ID replaces that
-    /// value while migrating settings, after which port changes leave it alone.
+    /// Durable identity for clients and per-phone settings. A provisional
+    /// wireless entry keeps its first endpoint here; later port changes only
+    /// update `phone.serial` and `connect_address`.
     #[serde(default)]
     pub id: String,
+    /// The stable identity reported by the phone, once a targeted query has
+    /// succeeded. It reconciles wired and wireless records without changing
+    /// the durable ID clients already saw.
+    #[serde(default)]
+    pub hardware_id: Option<String>,
     pub phone: Phone,
     pub transport: Transport,
     /// Wireless debugging's connect endpoint. Pairing uses a separate,

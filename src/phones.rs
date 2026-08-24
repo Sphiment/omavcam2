@@ -237,6 +237,21 @@ pub struct Registry {
     pub phones: Vec<KnownPhone>,
 }
 
+impl Registry {
+    fn migrate_hardware_ids(&mut self) {
+        for phone in &mut self.phones {
+            if phone.hardware_id.is_none() && phone.transport == crate::protocol::Transport::Wired {
+                phone.hardware_id = Some(phone.phone.serial.clone());
+            } else if phone.hardware_id.is_none()
+                && !phone.id.is_empty()
+                && phone.connect_address.as_deref() != Some(&phone.id)
+            {
+                phone.hardware_id = Some(phone.id.clone());
+            }
+        }
+    }
+}
+
 fn registry_path(state_dir: &Path) -> PathBuf {
     state_dir.join("phones.json")
 }
@@ -254,10 +269,12 @@ pub fn load(state_dir: &Path) -> Registry {
             return Registry::default();
         }
     };
-    serde_json::from_str(&text).unwrap_or_else(|e| {
+    let mut registry = serde_json::from_str(&text).unwrap_or_else(|e| {
         eprintln!("omavcam: could not parse {}: {e}", path.display());
         Registry::default()
-    })
+    });
+    registry.migrate_hardware_ids();
+    registry
 }
 
 pub fn save(state_dir: &Path, registry: &Registry) -> std::io::Result<()> {
@@ -340,5 +357,26 @@ mod tests {
     fn the_registry_accepts_fields_added_after_an_older_file_was_written() {
         let registry: Registry = serde_json::from_str("{}").unwrap();
         assert_eq!(registry.selected, None);
+    }
+
+    #[test]
+    fn an_old_wireless_id_is_recognised_as_its_hardware_id() {
+        let mut registry = Registry {
+            phones: vec![KnownPhone {
+                id: "device-id".into(),
+                hardware_id: None,
+                phone: Phone {
+                    serial: "192.0.2.1:40000".into(),
+                    name: "Pixel".into(),
+                },
+                transport: crate::protocol::Transport::Wireless,
+                connect_address: Some("192.0.2.1:40000".into()),
+            }],
+            ..Registry::default()
+        };
+
+        registry.migrate_hardware_ids();
+
+        assert_eq!(registry.phones[0].hardware_id.as_deref(), Some("device-id"));
     }
 }

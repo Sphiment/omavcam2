@@ -125,8 +125,9 @@ fn the_panel_toggles_the_preview_with_the_omarchy_theme_tokens() {
         "a refused preview style would be retried forever"
     );
     assert!(
-        panel.contains("known.transport === \"wireless\""),
-        "the picker offers unplugged wired registry entries"
+        panel.contains("known.transport === \"wireless\"")
+            && panel.contains("item.phone.serial === known.hardware_id"),
+        "an unplugged wired registry entry cannot be selected"
     );
     assert!(
         panel.contains("FloatingWindow")

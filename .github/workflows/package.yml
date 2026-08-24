@@ -17,7 +17,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # pkgver() counts commits, so a shallow clone would name the package
           # after a history it cannot see.
@@ -50,7 +50,7 @@ jobs:
 
       # Every build is downloadable, so a pull request can be installed and
       # tried before it is a release.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: omavcam-git-x86_64
           path: out/*.pkg.tar.zst

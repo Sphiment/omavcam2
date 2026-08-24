@@ -91,6 +91,7 @@ impl Fixture {
                         self.dir.join("proc").display()
                     ),
                     "--setenv=OMAVCAM_STARTUP_MS=500".to_string(),
+                    "--setenv=OMAVCAM_PREVIEW_MS=500".to_string(),
                     "--setenv=OMAVCAM_COMMAND_MS=100".to_string(),
                     format!("--setenv=OMAVCAM_POLL_MS={}", self.poll_ms),
                 ])
@@ -120,7 +121,7 @@ impl Fixture {
         fs::create_dir_all(dir.join("proc")).unwrap();
 
         let stub = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/stub");
-        for tool in ["adb", "scrcpy", "v4l2-ctl", "modprobe"] {
+        for tool in ["adb", "scrcpy", "v4l2-ctl", "modprobe", "hyprctl"] {
             fs::copy(&stub, bin_dir.join(tool)).unwrap();
         }
 
@@ -143,8 +144,9 @@ impl Fixture {
              --camera-id=1    (front, 3264x2448, fps={15, 24, 30}, zoom-range=[1, 4])\n\
                  - 1920x1080\n\
                  - 1280x720\n\
-                 - 640x480\n",
+             - 640x480\n",
         );
+        fixture.script_preview_window([120, 80]);
         fixture
     }
 
@@ -178,6 +180,7 @@ impl Fixture {
             .env("OMAVCAM_V4L2_DIR", self.dir.join("sys"))
             .env("OMAVCAM_PROC_DIR", self.dir.join("proc"))
             .env("OMAVCAM_STARTUP_MS", "500")
+            .env("OMAVCAM_PREVIEW_MS", "500")
             .env("OMAVCAM_COMMAND_MS", "100")
             // The daemon polls adb for attached phones; tests should not wait a
             // real second for a plug or an unplug to be noticed.
@@ -363,6 +366,21 @@ impl Fixture {
             out.push_str(" transport_id:1\n");
         }
         out
+    }
+
+    pub fn script_preview_window(&self, at: [i64; 2]) {
+        fs::write(
+            self.stub_dir.join("hyprctl.clients.out"),
+            json!([{
+                "title": "omavcam preview",
+                "at": at,
+                "size": [640, 360],
+                "floating": true,
+                "pinned": true,
+            }])
+            .to_string(),
+        )
+        .unwrap();
     }
 }
 

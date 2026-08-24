@@ -81,9 +81,14 @@ pub struct Capture {
     /// The frame size, fixed for this capture's lifetime: a restart at another
     /// size freezes whatever is watching (ADR-0010).
     pub size: String,
-    /// Whether this capture asked the phone to stay awake while plugged in,
-    /// which also says whether stopping has a setting to put back.
+    /// Kept in protocol v2 for clients that already read it. Preview captures
+    /// require `--no-control`, so new captures always report false: scrcpy
+    /// refuses `--stay-awake` with that flag.
     pub stay_awake: bool,
+    /// Whether scrcpy's own window is on-screen. Hiding moves that same
+    /// window; it never replaces the capture.
+    #[serde(default)]
+    pub preview: bool,
 }
 
 /// One Android device, identified by the serial adb reports, under a name a

@@ -18,7 +18,7 @@ Meet's camera list. Lens, resolution, frame rate, aspect ratio and zoom can be
 staged and applied from the CLI. There is also a bar widget, so starting and
 stopping needs no terminal.
 
-There is no preview or Studio yet. Those are the next tickets.
+There is no Studio yet. That is the next ticket.
 
 ## Requirements
 
@@ -187,6 +187,19 @@ pins the format by itself, while an idle node must remain free to accept the
 size changes ticket #9 allows. `sustain_framerate` and `timeout` keep consumers
 that dislike stalled input attached across a same-size restart.
 
+The same scrcpy process also draws the floating preview. It is launched with a
+known title and `--no-control`, so clicks and typing are never forwarded to the
+phone. The panel hides it by moving that window off-screen and restores its last
+position; scrcpy and the virtual camera keep running throughout. Hyprland rules
+make it floating, pinned on every workspace, aspect-ratio preserving,
+unfocusable, and resistant to the compositor's close shortcut. They also apply
+the active Omarchy corner radius and border width.
+
+`omavcam start --stay-awake` is refused while the floating preview is part of
+the capture. scrcpy itself forbids `--stay-awake` together with the mandatory
+`--no-control`; omavcam does not weaken input safety or take ownership of
+restoring the phone's power setting.
+
 ## The bar widget
 
 An Omarchy plugin lives at the root of this repo, so it installs the ordinary
@@ -202,7 +215,7 @@ can fix — adb missing, the daemon unreachable, a phone that has not accepted
 the debugging prompt. Finding that out before the call is the entire point.
 
 Clicking it opens the **panel**: a status light, the connection in words, and
-the switch that starts and stops the capture. Whenever more than one phone is
+switches for the capture and its preview. Whenever more than one phone is
 attached the panel offers them and picking one takes effect — whatever phase
 the connection is in, because the second phone appearing on the desk is the
 moment someone wants to switch. The phone in use is marked, one that has not

@@ -98,3 +98,22 @@ fn the_plugin_asks_the_daemon_and_runs_nothing_itself() {
         }
     }
 }
+
+#[test]
+fn the_panel_toggles_the_preview_with_the_omarchy_theme_tokens() {
+    let panel = fs::read_to_string(repo().join("plugin/Panel.qml")).unwrap();
+
+    assert!(panel.contains("label: \"Preview\""), "no preview control");
+    assert!(
+        panel.contains("Style.cornerRadius"),
+        "rounding is not themed"
+    );
+    assert!(
+        panel.contains("Style.normalBorderWidth"),
+        "border width is not themed"
+    );
+    assert!(
+        panel.contains("send(\"preview\""),
+        "the panel never asks the daemon"
+    );
+}

@@ -49,12 +49,119 @@ fn start_launches_a_capture_against_the_selected_phone() {
         &format!("-s {PIXEL}"),
         "--video-source=camera",
         "--v4l2-sink=/dev/video42",
+        "--no-control",
+        "--window-title=omavcam preview",
     ] {
         assert!(
             calls[0].contains(arg),
             "scrcpy was not given {arg}: {calls:?}"
         );
     }
+    assert!(!calls[0].contains("--no-window"), "{calls:?}");
+    assert_eq!(state["capture"]["preview"], json!(true));
+
+    let argv = f.argv();
+    let rule = argv
+        .iter()
+        .position(|line| line.starts_with("hyprctl eval "))
+        .unwrap_or_else(|| panic!("the preview rule was never applied: {argv:?}"));
+    let scrcpy = argv
+        .iter()
+        .position(|line| line.starts_with("scrcpy "))
+        .unwrap();
+    assert!(
+        rule < scrcpy,
+        "the rule must exist before the window maps: {argv:?}"
+    );
+    for setting in [
+        "float = true",
+        "pin = true",
+        "no_focus = true",
+        "no_initial_focus = true",
+        "keep_aspect_ratio = true",
+        "no_close_for = 2147483647",
+    ] {
+        assert!(
+            argv[rule].contains(setting),
+            "{setting} missing: {}",
+            argv[rule]
+        );
+    }
+    assert!(
+        argv.iter()
+            .any(|line| line.contains("hl.dsp.window.center")),
+        "the window was not placed after it appeared: {argv:?}"
+    );
+    let probes = argv
+        .iter()
+        .filter(|line| line.starts_with("hyprctl clients "))
+        .count();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(
+        f.argv()
+            .iter()
+            .filter(|line| line.starts_with("hyprctl clients "))
+            .count(),
+        probes,
+        "window discovery is a startup wait, not a permanent poll"
+    );
+}
+
+#[test]
+fn preview_hides_and_returns_without_disturbing_the_capture() {
+    let (f, mut client) = ready();
+    client.request_with("start", json!({"rounding": 8, "border_size": 2}));
+    client.await_state("the preview to be visible", |state| {
+        state["capture"]["preview"] == json!(true)
+    });
+    f.await_argv("scrcpy", 1);
+
+    let response = client.request_with(
+        "preview",
+        json!({"visible": false, "rounding": 8, "border_size": 2}),
+    );
+    assert_eq!(response["ok"], json!(true), "{response}");
+    let hidden = client.await_state("the preview to be hidden", |state| {
+        state["capture"]["preview"] == json!(false)
+    });
+    assert!(!hidden["capture"].is_null(), "hiding is not stopping");
+    assert!(
+        f.argv()
+            .iter()
+            .any(|line| { line.contains("hl.dsp.window.move") && line.contains("x = -2000") }),
+        "the preview was not moved off-screen: {:?}",
+        f.argv()
+    );
+
+    let response = client.request_with(
+        "preview",
+        json!({"visible": true, "rounding": 8, "border_size": 2}),
+    );
+    assert_eq!(response["ok"], json!(true), "{response}");
+    client.await_state("the preview to return", |state| {
+        state["capture"]["preview"] == json!(true)
+    });
+    assert_eq!(
+        f.await_argv("scrcpy", 1).len(),
+        1,
+        "showing the same window must not replace the capture"
+    );
+    let calls = f.argv();
+    assert!(
+        calls.iter().any(|line| {
+            line.contains("hl.dsp.window.move")
+                && line.contains("x = 120")
+                && line.contains("y = 80")
+        }),
+        "the preview did not return to its saved position: {calls:?}"
+    );
+    let themed = calls
+        .iter()
+        .rev()
+        .find(|line| line.starts_with("hyprctl eval "))
+        .unwrap();
+    assert!(themed.contains("rounding = 8"), "{themed}");
+    assert!(themed.contains("border_size = 2"), "{themed}");
 }
 
 #[test]
@@ -425,19 +532,32 @@ fn starting_again_after_the_capture_died_launches_a_new_one() {
 }
 
 #[test]
-fn a_capture_can_ask_the_phone_to_stay_awake() {
+fn stay_awake_is_refused_because_the_preview_requires_control_off() {
     let (f, mut client) = ready();
 
-    client.request_with("start", json!({"stay_awake": true}));
-    let state = client.await_state("the capture to be running", running);
-    assert_eq!(state["capture"]["stay_awake"], json!(true));
+    let response = client.request_with("start", json!({"stay_awake": true}));
 
-    // scrcpy owns the setting and puts it back itself, even when killed, so
-    // the only thing to assert is that it was asked. It refuses the flag while
-    // control is disabled, which is why --no-control goes with it.
-    let call = &f.await_argv("scrcpy", 1)[0];
-    assert!(call.contains("--stay-awake"), "{call}");
-    assert!(!call.contains("--no-control"), "{call}");
+    assert_eq!(response["ok"], json!(false), "{response}");
+    assert_eq!(response["error"]["code"], json!("preview_conflict"));
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--no-control"),
+        "{response}"
+    );
+    assert!(client.state()["capture"].is_null());
+    assert!(
+        !f.argv().iter().any(|line| line.starts_with("scrcpy ")),
+        "the unsafe capture was not launched: {:?}",
+        f.argv()
+    );
+
+    let out = f.cli(&["start", "--stay-awake"]);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("preview_conflict"), "{stderr}");
+    assert!(stderr.contains("--no-control"), "{stderr}");
 }
 
 #[test]
@@ -451,10 +571,11 @@ fn a_capture_that_never_asked_keeps_control_off() {
     let call = &f.await_argv("scrcpy", 1)[0];
     assert!(call.contains("--no-control"), "{call}");
     assert!(!call.contains("--stay-awake"), "{call}");
+    assert!(!call.contains("--no-window"), "{call}");
 }
 
 #[test]
-fn a_failed_start_offers_the_tips_only_the_person_holding_the_phone_can_act_on() {
+fn a_failed_start_offers_the_camera_owner_tip() {
     let f = Fixture::start();
     f.script_exit("scrcpy", 2);
     f.script_devices(&[(PIXEL, "device", Some("Pixel_7"))]);
@@ -468,5 +589,5 @@ fn a_failed_start_offers_the_tips_only_the_person_holding_the_phone_can_act_on()
 
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains("holding the camera"), "{stderr}");
-    assert!(stderr.contains("--stay-awake"), "{stderr}");
+    assert!(!stderr.contains("--stay-awake"), "{stderr}");
 }

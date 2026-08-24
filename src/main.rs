@@ -146,9 +146,7 @@ fn request(kind: &str, args: Value) -> ExitCode {
     if code == "capture_failed" {
         eprintln!(
             "tip: another app on the phone may be holding the camera — close it and try again; \
-             face unlock is one of them, so unlock with a PIN while a capture is running\n\
-             tip: `omavcam start --stay-awake` keeps the screen on while the phone is plugged \
-             in, so the screen turning off mid-capture cannot disconnect the camera"
+             face unlock is one of them, so unlock with a PIN while a capture is running"
         );
     }
     ExitCode::FAILURE
@@ -242,6 +240,8 @@ fn render(state: &State) -> String {
                 c.node,
                 if c.stay_awake {
                     " — staying awake"
+                } else if !c.preview {
+                    " — preview hidden"
                 } else {
                     ""
                 }

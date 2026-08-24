@@ -8,6 +8,8 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use serde_json::Value;
+
 use crate::command;
 use crate::settings::{self, CameraSettings};
 
@@ -16,6 +18,11 @@ use crate::settings::{self, CameraSettings};
 /// guarantee — another device can already hold the number (ADR-0008).
 pub const CARD_LABEL: &str = "omavcam";
 
+/// scrcpy's window is the preview. Its title is the stable selector shared by
+/// every rule and compositor operation.
+pub const PREVIEW_TITLE: &str = "omavcam preview";
+
+const PREVIEW_SELECTOR: &str = "title:^(omavcam preview)$";
 /// How long the node keeps delivering frames after its writer stops. Enough
 /// that an application which times out on stalled input keeps its camera when
 /// a capture is restarted.
@@ -105,25 +112,15 @@ pub fn set_controls(node: &str) {
     }
 }
 
-/// Launch the capture. The preview window belongs to a later ticket (ADR-0013),
-/// so this one draws nothing.
-///
-/// `stay_awake` is scrcpy's own `--stay-awake`, which sets the phone's
-/// "stay on while plugged in" setting and puts it back when the capture ends —
-/// even when the process is killed outright, because the device-side server is
-/// what restores it. Verified on hardware. scrcpy refuses the flag while
-/// control is disabled, so that capture is launched with control on.
-///
-/// Control is otherwise off: ADR-0013 needs `--no-control` once the preview
-/// exists, or the window forwards clicks and keystrokes to the phone. There is
-/// no window here (`--no-window`), so nothing can forward anything, and the
-/// two only collide when the preview ticket lands.
+/// Launch one process that writes the virtual camera and draws its own preview.
+/// Control is always off, or that window forwards input to the phone.
 ///
 pub fn spawn(
     serial: &str,
     node: &str,
-    stay_awake: bool,
     settings: &CameraSettings,
+    rounding: u64,
+    border_size: u64,
 ) -> std::io::Result<Child> {
     if node_is_capture(node)? {
         return Err(std::io::Error::new(
@@ -131,6 +128,14 @@ pub fn spawn(
             format!("{node} already has a producer"),
         ));
     }
+    apply_preview_rule(rounding, border_size)?;
+    let output_size = settings::output_size(settings);
+    let (width, height) = output_size
+        .split_once('x')
+        .and_then(|(width, height)| Some((width.parse::<u32>().ok()?, height.parse::<u32>().ok()?)))
+        .ok_or_else(|| std::io::Error::other(format!("invalid output size {output_size}")))?;
+    let window_width = 640;
+    let window_height = (window_width * height / width).max(1);
     let mut process = Command::new("scrcpy");
     process.args([
         "-s",
@@ -142,18 +147,15 @@ pub fn spawn(
         &format!("--camera-zoom={}", settings.zoom),
         &format!("--v4l2-sink={node}"),
         "--no-audio",
-        "--no-window",
+        "--no-control",
+        &format!("--window-title={PREVIEW_TITLE}"),
+        &format!("--window-width={window_width}"),
+        &format!("--window-height={window_height}"),
     ]);
     if let Some((width, height, x, y)) = settings::crop_pixels(settings) {
         process.arg(format!("--crop={width}:{height}:{x}:{y}"));
     }
-    let mut child = process
-        .args(match stay_awake {
-            true => ["--stay-awake"],
-            false => ["--no-control"],
-        })
-        .stdin(Stdio::null())
-        .spawn()?;
+    let mut child = process.stdin(Stdio::null()).spawn()?;
 
     // `spawn` only proves that the executable existed. `exclusive_caps=1`
     // changes the node from output-only to capture-capable when scrcpy really
@@ -180,7 +182,7 @@ pub fn spawn(
             }
         }
         match node_is_capture(node) {
-            Ok(true) => return Ok(child),
+            Ok(true) => break,
             Ok(false) => {}
             Err(e) => {
                 let _ = child.kill();
@@ -197,6 +199,113 @@ pub fn spawn(
             ));
         }
         thread::sleep(Duration::from_millis(25));
+    }
+
+    if let Err(e) = wait_for_preview().and_then(|()| center_preview()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(e);
+    }
+    Ok(child)
+}
+
+/// Apply before the window maps, so it never flashes tiled or takes focus.
+/// Reapplying the named rule updates theme values on a window already open.
+pub fn apply_preview_rule(rounding: u64, border_size: u64) -> std::io::Result<()> {
+    // Hyprland's only close guard is measured in milliseconds and stored as a
+    // signed int. Its maximum keeps the capture safe for just under 25 days.
+    // ponytail: replace this with an indefinite compositor primitive if one is
+    // added; owning an adb power-setting restore is a larger failure mode.
+    let rule = format!(
+        "o.window({{ title = \"^(omavcam preview)$\" }}, \
+         {{ name = \"omavcam-preview\", float = true, pin = true, no_dim = true, \
+         no_focus = true, no_initial_focus = true, keep_aspect_ratio = true, \
+         no_close_for = 2147483647, rounding = {rounding}, border_size = {border_size}, \
+         opacity = \"1 1\", tag = \"-default-opacity\" }})"
+    );
+    hyprctl(&["eval", &rule])
+}
+
+pub fn preview_position() -> std::io::Result<[i64; 2]> {
+    preview_client()?
+        .get("at")
+        .and_then(Value::as_array)
+        .filter(|at| at.len() == 2)
+        .and_then(|at| Some([at[0].as_i64()?, at[1].as_i64()?]))
+        .ok_or_else(|| std::io::Error::other("Hyprland reported no preview position"))
+}
+
+pub fn move_preview(at: [i64; 2]) -> std::io::Result<()> {
+    hyprctl(&[
+        "dispatch",
+        &format!(
+            "hl.dsp.window.move({{ window = \"{PREVIEW_SELECTOR}\", x = {}, y = {} }})",
+            at[0], at[1]
+        ),
+    ])
+}
+
+pub fn center_preview() -> std::io::Result<()> {
+    hyprctl(&[
+        "dispatch",
+        &format!("hl.dsp.window.center({{ window = \"{PREVIEW_SELECTOR}\" }})"),
+    ])
+}
+
+fn wait_for_preview() -> std::io::Result<()> {
+    let wait_ms = std::env::var("OMAVCAM_PREVIEW_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(5000);
+    let deadline = Instant::now() + Duration::from_millis(wait_ms);
+    loop {
+        match preview_client() {
+            Ok(_) => return Ok(()),
+            Err(e) if Instant::now() >= deadline => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("preview window did not appear within {wait_ms}ms: {e}"),
+                ))
+            }
+            Err(_) => thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
+fn preview_client() -> std::io::Result<Value> {
+    let mut process = Command::new("hyprctl");
+    process.args(["clients", "-j"]);
+    let output = command::output(process)?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "hyprctl clients failed ({})",
+            output.status
+        )));
+    }
+    let clients: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    clients
+        .as_array()
+        .and_then(|clients| {
+            clients
+                .iter()
+                .find(|client| client["title"] == PREVIEW_TITLE)
+        })
+        .cloned()
+        .ok_or_else(|| std::io::Error::other("preview window is not mapped"))
+}
+
+fn hyprctl(args: &[&str]) -> std::io::Result<()> {
+    let mut process = Command::new("hyprctl");
+    process.args(args);
+    let status = command::status(process)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "hyprctl {} failed ({status})",
+            args.first().unwrap_or(&"")
+        )))
     }
 }
 

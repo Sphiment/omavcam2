@@ -4,9 +4,10 @@ Turns an Android phone into a webcam on Omarchy. A phone's camera or screen is
 captured over adb, written to a virtual video device, and appears to Meet, Zoom,
 OBS and Discord as an ordinary webcam.
 
-This is the rewrite. The shape is a Rust **daemon** that owns everything, and
-thin **clients** — a CLI, a bar widget, and Studio — that render what it pushes
-them. See [CONTEXT.md](CONTEXT.md) for the vocabulary and
+This repository is the Rust **daemon** and its CLI. The daemon owns everything;
+thin clients render the state it pushes them. The Omarchy wrapper lives in the
+separate [`Sphiment/omavcam`](https://github.com/Sphiment/omavcam) repository.
+See [CONTEXT.md](CONTEXT.md) for the vocabulary and
 [docs/adr/](docs/adr/) for why it is built this way.
 
 ## Status
@@ -15,19 +16,16 @@ Early. What exists today is the daemon, the socket protocol, the test harness
 everything else is built on, wired and wireless connection, and a capture that
 can be started and stopped: `omavcam start` makes the phone's camera appear in
 Meet's camera list. Lens, resolution, frame rate, aspect ratio and zoom can be
-staged and applied from the CLI. There is also a bar widget, so starting and
-stopping needs no terminal, and an Arch package — built by CI, installed from
-this repo's releases — that installs the engine and configures the module, so
+staged and applied from the CLI. An Arch package — built by CI and installed
+from this repo's releases — installs the engine and configures the module, so
 none of it has to be assembled by hand.
 
 There is no Studio yet. That is the next ticket.
 
 ## Install
 
-omavcam is two halves: the **engine** — a Rust daemon and the `omavcam` CLI,
-installed as an Arch package — and the **bar widget**, an Omarchy plugin
-installed by cloning this repo. Both are needed: the widget is a client and
-does nothing on its own.
+Install this engine first, then install the separate Omarchy wrapper if you want
+bar controls. The daemon and CLI work without the wrapper.
 
 ```sh
 # 0. Up to date, and able to build a kernel module. v4l2loopback is a DKMS
@@ -46,8 +44,8 @@ sudo pacman -U https://github.com/Sphiment/omavcam2/releases/latest/download/oma
 sudo modprobe v4l2loopback
 systemctl --user daemon-reload && systemctl --user start omavcam.socket
 
-# 3. The bar widget.
-omarchy plugin add https://github.com/Sphiment/omavcam2.git --enable
+# 3. Optional: the Omarchy bar wrapper.
+omarchy plugin add https://github.com/Sphiment/omavcam.git --enable
 ```
 
 `omarchy plugin add --enable` asks where in the bar to put the widget, so that
@@ -172,7 +170,7 @@ than whatever the default branch had drifted to.
 ```sh
 systemctl --user stop omavcam.socket omavcam.service
 sudo pacman -Rns omavcam-git  # takes the units and the module configuration with it
-omarchy plugin remove sphiment.omavcam2
+omarchy plugin remove sphiment.omavcam
 ```
 
 `stop`, not `disable`: the socket was enabled by a symlink the package owns, so
@@ -203,16 +201,12 @@ omavcam will never write this for you. It is a global compositor setting that
 changes how *every* floating window behaves, and a plugin has no business
 deciding that. omavcam writes nothing to your Hyprland config at all.
 
-## This is Omarchy-specific
+## Platform scope
 
-The widget is an Omarchy plugin and assumes Omarchy's shell: its `Panel`,
-`Toggle` and `Style` components, its theme tokens, and `omarchy plugin add` as
-the way it is installed. The preview's window rules are written in Omarchy's
-Lua wrapper (`hl.config`, `o.window`), which stock Hyprland does not have.
-
-The engine itself is less fussy — the daemon, the CLI and the capture need only
-systemd, Hyprland and the tools above — but nothing here is tested anywhere
-else, and the Lua assumptions do not hold on stock Hyprland.
+The daemon, CLI, and capture need systemd, Hyprland, and the tools above. The
+preview's window rules use Omarchy's Lua wrapper (`hl.config`, `o.window`), so
+this repository is still tested on Omarchy rather than stock Hyprland. The
+Omarchy shell integration itself belongs to the wrapper repository.
 
 ## Use
 
@@ -348,51 +342,6 @@ the capture. scrcpy itself forbids `--stay-awake` together with the mandatory
 `--no-control`; omavcam does not weaken input safety or take ownership of
 restoring the phone's power setting.
 
-## The bar widget
-
-An Omarchy plugin lives at the root of this repo, so the widget itself installs
-the ordinary way:
-
-```sh
-omarchy plugin add https://github.com/Sphiment/omavcam2.git --enable
-```
-
-The widget is only a client, though: the engine has to be installed too, or
-the bar shows a widget with nothing behind it — see [Install](#install). When
-that is the case the panel says so and names the command that fixes it, and it
-does the same for a missing `scrcpy`, `adb` or `v4l2loopback-dkms`: the daemon
-reports what it cannot find and the package that supplies it, and the panel
-offers the install. It never runs one — it runs nothing at all (ADR-0001).
-
-The icon says which of three things is true at a glance: a capture is running,
-nothing is capturing, or something is wrong that only the person at the desk
-can fix — adb missing, the daemon unreachable, a phone that has not accepted
-the debugging prompt. Finding that out before the call is the entire point.
-
-Clicking it opens the **panel**: a status light, the connection in words, and
-switches for the capture and its preview. Whenever more than one phone is
-attached the panel offers them and picking one takes effect — whatever phase
-the connection is in, because the second phone appearing on the desk is the
-moment someone wants to switch. The phone in use is marked, one that has not
-accepted the debugging prompt is dimmed and said to be, and switching while a
-capture is running says it will stop the capture before it does. Nothing else
-goes in there — settings are Studio's job, and the frequent action has to be
-instant.
-
-The plugin holds no state and makes no system calls. It opens the socket,
-renders what it is pushed, and sends requests; every `scrcpy`, `adb` and
-`hyprctl` invocation in this project lives in the daemon (ADR-0001), and a
-test asserts the plugin has no way to run one. Connecting is also what starts
-the daemon, so the widget appearing in the bar is what makes omavcam exist.
-
-State changed from elsewhere — `omavcam start` in a terminal, a phone
-unplugged — arrives as a push, so the panel is right without being reopened.
-A daemon that stops leaves the widget saying so and reconnecting recovers it,
-which is the whole of the recovery: the daemon pushes its state on connect and
-there is nothing to resync. The wait between attempts doubles up to half a
-minute, because a daemon that cannot start at all would otherwise be asked to
-twice a second forever, and every attempt is another failed activation.
-
 ## How the pieces talk
 
 Line-delimited JSON over a unix socket in the runtime dir. The daemon pushes the
@@ -441,8 +390,6 @@ src/daemon.rs     the daemon: state, clients, pushing
 src/phones.rs     what adb sees, which phone is selected, what that means
 src/capture.rs    finding the virtual camera, and launching scrcpy at it
 src/main.rs       the CLI, and the entry point for both
-manifest.json     the Omarchy plugin manifest, at the root so a clone installs
-plugin/Panel.qml  the bar widget and its panel: a client, and nothing more
 systemd/          the socket and service units
 packaging/        the PKGBUILD, its install hook, and the module config
 .github/          the workflow that builds the package and publishes releases

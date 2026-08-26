@@ -13,7 +13,7 @@ picked up by hand:
 
 Then add the bar widget and start a capture:
 
-  omarchy plugin add https://github.com/Sphiment/omavcam2.git --enable
+  omarchy plugin add https://github.com/Sphiment/omavcam.git --enable
   omavcam start
 
 Nothing needs root again after this: the module is configured at install time

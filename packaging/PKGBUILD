@@ -1,8 +1,8 @@
 # Maintainer: Sphiment <sphiment@gmail.com>
 #
-# The engine ships as an Arch package because Omarchy installs plugins by
-# cloning them with no build step, so a compiled binary cannot live inside the
-# plugin. The bar widget still installs with `omarchy plugin add`.
+# The engine ships as an Arch package because it is a compiled daemon with
+# systemd units and kernel-module configuration. The separate Omarchy wrapper
+# installs from https://github.com/Sphiment/omavcam.
 #
 # CI builds this on every push and attaches it to a release, so nobody has to
 # compile omavcam to use it (.github/workflows/package.yml). The AUR is closed

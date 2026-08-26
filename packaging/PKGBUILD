@@ -2,7 +2,7 @@
 #
 # The engine ships as an Arch package because it is a compiled daemon with
 # systemd units and kernel-module configuration. The separate Omarchy wrapper
-# installs from https://github.com/Sphiment/omavcam.
+# installs from https://github.com/Sphiment/omavcamd.
 #
 # CI builds this on every push and attaches it to a release, so nobody has to
 # compile vcamd to use it (.github/workflows/package.yml). The AUR is closed

@@ -6,7 +6,7 @@ OBS and Discord as an ordinary webcam.
 
 This repository is the Rust **daemon** and its CLI. The daemon owns everything;
 thin clients render the state it pushes them. The Omarchy wrapper lives in the
-separate [`Sphiment/omavcam`](https://github.com/Sphiment/omavcam) repository.
+separate [`Sphiment/omavcamd`](https://github.com/Sphiment/omavcamd) repository.
 See [CONTEXT.md](CONTEXT.md) for the vocabulary and
 [docs/adr/](docs/adr/) for why it is built this way.
 
@@ -45,7 +45,7 @@ sudo modprobe v4l2loopback
 systemctl --user daemon-reload && systemctl --user start vcamd.socket
 
 # 3. Optional: the Omarchy bar wrapper.
-omarchy plugin add https://github.com/Sphiment/omavcam.git --enable
+omarchy plugin add https://github.com/Sphiment/omavcamd.git --enable
 ```
 
 `omarchy plugin add --enable` asks where in the bar to put the widget, so that
@@ -170,7 +170,7 @@ than whatever the default branch had drifted to.
 ```sh
 systemctl --user stop vcamd.socket vcamd.service
 sudo pacman -Rns vcamd-git  # takes the units and the module configuration with it
-omarchy plugin remove sphiment.omavcam
+omarchy plugin remove sphiment.omavcamd
 ```
 
 `stop`, not `disable`: the socket was enabled by a symlink the package owns, so

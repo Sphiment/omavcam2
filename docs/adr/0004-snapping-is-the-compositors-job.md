@@ -1,7 +1,7 @@
 # Snapping is the compositor's job
 
-omavcam implements no drag-snapping. Hyprland's built-in `general:snap` does it.
-The nine anchors survive only as commands — `omavcam preview move top-right`,
+vcamd implements no drag-snapping. Hyprland's built-in `general:snap` does it.
+The nine anchors survive only as commands — `vcamd preview move top-right`,
 the panel, a keybinding — which are exact and need no drag at all.
 
 This ADR exists because the obvious reading of the old codebase is "snapping was
@@ -48,7 +48,7 @@ magnet hard to hit; 60-90 feels closer to the old behaviour.
 
 This is a **global compositor setting**, affecting every floating window. It
 belongs in the user's `~/.config/hypr/looknfeel.lua`, suggested in the README.
-omavcam must not switch it on silently: a plugin has no business changing how
+vcamd must not switch it on silently: a plugin has no business changing how
 all of someone's windows behave.
 
 Hyprland snaps to monitor edges and other windows, not to nine named positions —

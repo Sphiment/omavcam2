@@ -33,7 +33,7 @@ are correct exactly until a second phone is plugged in, which makes them a
 latent bug that testing on a tidy desk will never surface.
 
 The selected phone is remembered and re-selected when it reappears. When it is
-absent and another phone is attached, omavcam **does not** switch to it: silently
+absent and another phone is attached, vcamd **does not** switch to it: silently
 repointing a webcam at a different room is worse than reporting no phone.
 
 Settings are keyed per phone. Lens ids, available resolutions and zoom ranges
@@ -67,7 +67,7 @@ chosen. The second phone appearing on the desk is the moment someone wants to
 switch, and a panel that shows a picker then and hides it a second later, once
 the daemon has remembered a phone, is a panel that hid the thing they came for.
 
-None of that changes the rule underneath: **omavcam never repoints itself.**
+None of that changes the rule underneath: **vcamd never repoints itself.**
 The picker is a person clicking, which is what makes it safe to put where the
 frequent actions are. The one phone that is already in use is not offered,
 because that is not a choice; and because switching stops a running capture,

@@ -26,7 +26,7 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> thread::JoinHandle<Vec<u8
 }
 
 fn timeout() -> Duration {
-    let ms = std::env::var("OMAVCAM_COMMAND_MS")
+    let ms = std::env::var("VCAMD_COMMAND_MS")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(10_000);

@@ -455,7 +455,7 @@ fn apply_preserves_preview_visibility_and_position() {
     assert!(
         argv[..replacement].iter().rev().any(|line| {
             line.starts_with("hyprctl eval ")
-                && line.contains("omavcam-preview")
+                && line.contains("vcamd-preview")
                 && line.contains("move = { 333, 222 }")
         }),
         "Apply had no saved-position compositor rule: {argv:?}"
@@ -480,7 +480,7 @@ fn apply_preserves_preview_visibility_and_position() {
     assert!(
         argv[..replacement].iter().rev().any(|line| {
             line.starts_with("hyprctl eval ")
-                && line.contains("omavcam-preview")
+                && line.contains("vcamd-preview")
                 && line.contains("move = { -641, 0 }")
         }),
         "Apply mapped the hidden preview without an offscreen compositor rule: {argv:?}"

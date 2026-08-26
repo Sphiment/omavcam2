@@ -26,7 +26,7 @@ fn main() -> ExitCode {
         [command] if command == "daemon" => match daemon::run() {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("omavcam: {e}");
+                eprintln!("vcamd: {e}");
                 ExitCode::from(2)
             }
         },
@@ -40,7 +40,7 @@ fn main() -> ExitCode {
                 json!({"setting": setting.replace('-', "_"), "value": value}),
             ),
             Err(message) => {
-                eprintln!("omavcam: invalid setting: {message}");
+                eprintln!("vcamd: invalid setting: {message}");
                 ExitCode::from(2)
             }
         },
@@ -69,10 +69,10 @@ fn main() -> ExitCode {
         [command, serial] if command == "select" => request("select", json!({"serial": serial})),
         other => {
             if let Some(command) = other.first() {
-                eprintln!("omavcam: invalid command: {command}");
+                eprintln!("vcamd: invalid command: {command}");
             }
             eprintln!(
-                "usage: omavcam [status|phones|refresh|select <serial>|pair [<pair-address> <code> <connect-address>]|connect <serial> <connect-address>|forget <serial>|start [--stay-awake]|stop|set <lens|resolution|frame-rate|aspect-ratio|zoom|crop> <value>|apply|discard|daemon]"
+                "usage: vcamd [status|phones|refresh|select <serial>|pair [<pair-address> <code> <connect-address>]|connect <serial> <connect-address>|forget <serial>|start [--stay-awake]|stop|set <lens|resolution|frame-rate|aspect-ratio|zoom|crop> <value>|apply|discard|daemon]"
             );
             ExitCode::from(2)
         }
@@ -119,8 +119,8 @@ fn request(kind: &str, args: Value) -> ExitCode {
             // both a missing socket and a daemon that will not start are
             // installation problems, not "the daemon isn't running".
             eprintln!(
-                "omavcam: no reply from {}: {e}\n\
-                 the daemon is socket-activated; check: systemctl --user status omavcam.socket omavcam.service",
+                "vcamd: no reply from {}: {e}\n\
+                 the daemon is socket-activated; check: systemctl --user status vcamd.socket vcamd.service",
                 socket_path().display()
             );
             return ExitCode::from(2);
@@ -133,7 +133,7 @@ fn request(kind: &str, args: Value) -> ExitCode {
     }
     let code = response["error"]["code"].as_str().unwrap_or("error");
     eprintln!(
-        "omavcam: {code}: {}",
+        "vcamd: {code}: {}",
         response["error"]["message"].as_str().unwrap_or(""),
     );
     // Not part of the error: the daemon cannot tell why scrcpy gave up, and
@@ -152,7 +152,7 @@ fn request(kind: &str, args: Value) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// What `omavcam status` prints. Each connection state gets the advice that
+/// What `vcamd status` prints. Each connection state gets the advice that
 /// belongs to it: which phone to look at, or which command to run next.
 fn render(state: &State) -> String {
     let phone = |p: &Phone| format!("{} ({})", p.name, p.serial);
@@ -163,7 +163,7 @@ fn render(state: &State) -> String {
             for p in available {
                 lines += &format!("  {}\n", phone(p));
             }
-            lines + "choose one with: omavcam select <serial>"
+            lines + "choose one with: vcamd select <serial>"
         }
         Connection::Unauthorised { phone: p } => format!(
             "phone: {} — unauthorised\naccept the debugging prompt on the phone",
@@ -174,7 +174,7 @@ fn render(state: &State) -> String {
         Connection::Reconnecting { phone: p } => {
             format!("phone: {} — reconnecting; last frame held", phone(p))
         }
-        Connection::NeedsPairing => "phone: wireless pairing needed\nopen Developer options → Wireless debugging → Pair device with pairing code; the pairing address beside the six-digit code and the connect address on the main screen are different\nthen run: omavcam pair <pair-address> <code> <connect-address>\nto go back to a phone on the cable instead: omavcam select <serial>".to_string(),
+        Connection::NeedsPairing => "phone: wireless pairing needed\nopen Developer options → Wireless debugging → Pair device with pairing code; the pairing address beside the six-digit code and the connect address on the main screen are different\nthen run: vcamd pair <pair-address> <code> <connect-address>\nto go back to a phone on the cable instead: vcamd select <serial>".to_string(),
         Connection::PairingFailed { reason } => format!(
             "phone: wireless pairing failed — {}",
             match reason {

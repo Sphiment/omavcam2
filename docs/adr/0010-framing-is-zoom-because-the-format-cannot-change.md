@@ -137,7 +137,7 @@ exclusive_caps, max_width, max_height`.
 
 ## Two nodes work
 
-`devices=2 video_nr=42,43 card_label=omavcam,"omavcam studio" exclusive_caps=1,1`
+`devices=2 video_nr=42,43 card_label=vcamd,"vcamd studio" exclusive_caps=1,1`
 creates both. Idle nodes advertise `Video Output` only and are invisible to
 camera applications; the Studio node stayed output-only while the public node
 was capturing. Lookup by `Card type` distinguishes them, so nothing needs a

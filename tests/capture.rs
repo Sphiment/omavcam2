@@ -50,7 +50,7 @@ fn start_launches_a_capture_against_the_selected_phone() {
         "--video-source=camera",
         "--v4l2-sink=/dev/video42",
         "--no-control",
-        "--window-title=omavcam preview",
+        "--window-title=vcamd preview",
     ] {
         assert!(
             calls[0].contains(arg),
@@ -96,7 +96,7 @@ fn start_launches_a_capture_against_the_selected_phone() {
     );
     assert!(
         argv.iter().any(|line| {
-            line.starts_with("hyprctl eval ") && line.contains("omavcam reconnecting")
+            line.starts_with("hyprctl eval ") && line.contains("vcamd reconnecting")
         }),
         "the transient reconnect preview has no rule: {argv:?}",
     );
@@ -278,7 +278,7 @@ fn an_immediate_scrcpy_failure_is_a_failed_start() {
 fn starting_with_no_phone_selected_is_refused_by_name() {
     let f = Fixture::start();
     f.script_hold("scrcpy");
-    // Two phones attached, so nothing is selected: omavcam never guesses.
+    // Two phones attached, so nothing is selected: vcamd never guesses.
     f.script_devices(&[
         (PIXEL, "device", Some("Pixel_7")),
         (GALAXY, "device", Some("Galaxy_S21")),
@@ -455,7 +455,7 @@ fn a_capture_dying_on_its_own_is_restarted_without_dropping_the_logical_capture(
     assert!(
         f.argv().iter().any(|line| {
             line.starts_with("hyprctl eval ")
-                && line.contains("omavcam reconnecting")
+                && line.contains("vcamd reconnecting")
                 && line.contains("move = { 120, 80 }")
         }),
         "the reconnect status did not inherit the preview position: {:?}",
@@ -480,14 +480,14 @@ fn a_capture_dying_on_its_own_is_restarted_without_dropping_the_logical_capture(
     let hidden = argv[..replacement]
         .iter()
         .rposition(|line| {
-            line.contains("hl.dsp.window.move") && line.contains("omavcam reconnecting")
+            line.contains("hl.dsp.window.move") && line.contains("vcamd reconnecting")
         })
         .expect("the reconnect status was not hidden before replacement");
     let hidden_rule = argv[..hidden]
         .iter()
         .rposition(|line| {
             line.starts_with("hyprctl eval ")
-                && line.contains("omavcam reconnecting")
+                && line.contains("vcamd reconnecting")
                 && line.contains("move = { -641, 0 }")
         })
         .expect("the reconnect status had no persistent offscreen rule");
@@ -495,7 +495,7 @@ fn a_capture_dying_on_its_own_is_restarted_without_dropping_the_logical_capture(
         .iter()
         .rposition(|line| {
             line.starts_with("hyprctl eval ")
-                && line.contains("omavcam-preview")
+                && line.contains("vcamd-preview")
                 && line.contains("move = { 120, 80 }")
         })
         .expect("the replacement preview had no saved-position rule");
@@ -504,7 +504,7 @@ fn a_capture_dying_on_its_own_is_restarted_without_dropping_the_logical_capture(
         argv[hidden + 1..replacement]
             .iter()
             .all(|line| !(line.starts_with("hyprctl eval ")
-                && line.contains("omavcam reconnecting"))),
+                && line.contains("vcamd reconnecting"))),
         "the hidden reconnect status was remapped before replacement: {argv:?}"
     );
 }
@@ -534,7 +534,7 @@ fn a_hidden_preview_maps_offscreen_when_the_writer_is_replaced() {
     assert!(
         argv[..replacement].iter().rev().any(|line| {
             line.starts_with("hyprctl eval ")
-                && line.contains("omavcam-preview")
+                && line.contains("vcamd-preview")
                 && line.contains("move = { -641, 0 }")
         }),
         "the hidden replacement had no offscreen compositor rule: {argv:?}"

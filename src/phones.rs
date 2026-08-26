@@ -1,6 +1,6 @@
 //! Which phones adb can see, which one is selected, and what that adds up to.
 //!
-//! The selection rules are ADR-0007's, and the one that matters is that omavcam
+//! The selection rules are ADR-0007's, and the one that matters is that vcamd
 //! never guesses: the second phone on the desk is usually charging, not waiting
 //! to be a webcam.
 
@@ -228,7 +228,7 @@ impl From<&Attached> for crate::protocol::Attached {
     }
 }
 
-/// What omavcam remembers about phones between runs: the selected one and the
+/// What vcamd remembers about phones between runs: the selected one and the
 /// phones wireless pairing knows about. One registry, not two.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -269,12 +269,12 @@ pub fn load(state_dir: &Path) -> Registry {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Registry::default(),
         Err(e) => {
-            eprintln!("omavcam: could not read {}: {e}", path.display());
+            eprintln!("vcamd: could not read {}: {e}", path.display());
             return Registry::default();
         }
     };
     let mut registry = serde_json::from_str(&text).unwrap_or_else(|e| {
-        eprintln!("omavcam: could not parse {}: {e}", path.display());
+        eprintln!("vcamd: could not parse {}: {e}", path.display());
         Registry::default()
     });
     registry.migrate_hardware_ids();

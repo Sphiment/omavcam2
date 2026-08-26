@@ -1,4 +1,4 @@
-//! Packaging: what the AUR package installs, and what omavcam says when
+//! Packaging: what the AUR package installs, and what vcamd says when
 //! something it needs is not installed.
 //!
 //! The package files are read rather than built — an `-git` PKGBUILD cannot be
@@ -28,7 +28,7 @@ fn packaging(file: &str) -> String {
 /// keep their quotes, because a `card_label` holding a space depends on them
 /// surviving into the line the kernel parses.
 fn module_parameters() -> Vec<(String, String)> {
-    let conf = packaging("omavcam.modprobe.conf");
+    let conf = packaging("vcamd.modprobe.conf");
     let line = conf
         .lines()
         .find(|line| line.starts_with("options v4l2loopback "))
@@ -66,11 +66,11 @@ fn parameter(name: &str) -> String {
 fn the_package_installs_the_engine_and_the_modules_configuration() {
     let pkgbuild = packaging("PKGBUILD");
     for installed in [
-        "\"$pkgdir/usr/bin/omavcam\"",
-        "\"$pkgdir/usr/lib/systemd/user/omavcam.socket\"",
-        "\"$pkgdir/usr/lib/systemd/user/omavcam.service\"",
-        "\"$pkgdir/usr/lib/modules-load.d/omavcam.conf\"",
-        "\"$pkgdir/usr/lib/modprobe.d/omavcam.conf\"",
+        "\"$pkgdir/usr/bin/vcamd\"",
+        "\"$pkgdir/usr/lib/systemd/user/vcamd.socket\"",
+        "\"$pkgdir/usr/lib/systemd/user/vcamd.service\"",
+        "\"$pkgdir/usr/lib/modules-load.d/vcamd.conf\"",
+        "\"$pkgdir/usr/lib/modprobe.d/vcamd.conf\"",
     ] {
         assert!(
             pkgbuild.contains(installed),
@@ -80,7 +80,7 @@ fn the_package_installs_the_engine_and_the_modules_configuration() {
     // Connecting to the socket is what starts the daemon, so a socket nothing
     // enabled is an engine that never exists.
     assert!(
-        pkgbuild.contains("sockets.target.wants/omavcam.socket"),
+        pkgbuild.contains("sockets.target.wants/vcamd.socket"),
         "the socket has to be enabled, or the widget talks to nothing"
     );
     for dependency in ["scrcpy", "android-tools", "v4l-utils", "v4l2loopback-dkms"] {
@@ -125,7 +125,7 @@ fn the_public_node_carries_the_label_the_daemon_looks_up() {
     let nodes: usize = parameter("devices").parse().unwrap();
     assert_eq!(labels.len(), nodes, "every node is labelled: {labels:?}");
     assert_eq!(
-        labels[0], "omavcam",
+        labels[0], "vcamd",
         "the public node is the one applications pick"
     );
     assert!(
@@ -145,11 +145,11 @@ fn the_public_node_carries_the_label_the_daemon_looks_up() {
     }
 }
 
-/// The module is loaded from boot by a file, never by omavcam: a
+/// The module is loaded from boot by a file, never by vcamd: a
 /// `systemd --user` service has no capabilities at all (ADR-0008).
 #[test]
 fn the_module_is_loaded_at_install_time_and_by_nothing_in_the_code() {
-    let modules_load = packaging("omavcam.modules-load.conf");
+    let modules_load = packaging("vcamd.modules-load.conf");
     assert!(
         modules_load
             .lines()
@@ -172,7 +172,7 @@ fn the_module_is_loaded_at_install_time_and_by_nothing_in_the_code() {
 /// the one thing pacman cannot take out of a running kernel by itself.
 #[test]
 fn uninstalling_leaves_no_loaded_module_behind() {
-    let install = packaging("omavcam.install");
+    let install = packaging("vcamd.install");
     let post_remove = install
         .split_once("post_remove()")
         .expect("a post_remove hook")
@@ -188,7 +188,7 @@ fn uninstalling_leaves_no_loaded_module_behind() {
 /// spellings together, and a mismatch is a 404 for everyone installing.
 #[test]
 fn the_readme_installs_the_asset_the_workflow_publishes() {
-    let asset = "omavcam-git-x86_64.pkg.tar.zst";
+    let asset = "vcamd-git-x86_64.pkg.tar.zst";
     let workflow = fs::read_to_string(repo().join(".github/workflows/package.yml"))
         .expect(".github/workflows/package.yml");
     let readme = fs::read_to_string(repo().join("README.md")).expect("README.md");
@@ -249,7 +249,7 @@ fn a_missing_virtual_camera_is_an_install_and_says_so() {
         stdout.contains("sudo pacman -S --needed v4l2loopback-dkms"),
         "the install is offered, not just the diagnosis: {stdout}"
     );
-    // The usual cause is a module installed with omavcam and not loaded since,
+    // The usual cause is a module installed with vcamd and not loaded since,
     // which pacman alone does not fix.
     assert!(
         stdout.contains("modprobe v4l2loopback"),

@@ -3,8 +3,8 @@
 # names by the test harness, ahead of the real ones on PATH. It records the argv
 # it was called with and prints whatever the test scripted for it.
 #
-#   $OMAVCAM_STUB_LOG    appended one line per call: "<tool> <args...>"
-#   $OMAVCAM_STUB_DIR    <tool>.out  printed on stdout, if present
+#   $VCAMD_STUB_LOG    appended one line per call: "<tool> <args...>"
+#   $VCAMD_STUB_DIR    <tool>.out  printed on stdout, if present
 #                        <tool>.code exit status, if present
 #                        <tool>.hold stay running while this file exists;
 #                        "released <tool>" is logged once it goes
@@ -15,21 +15,21 @@ case " $* " in
 esac
 logged_tool=$tool
 [ "$tool" = scrcpy ] && [ "$is_list" = true ] && logged_tool=scrcpy-list
-printf '%s\n' "$logged_tool $*" >>"$OMAVCAM_STUB_LOG"
+printf '%s\n' "$logged_tool $*" >>"$VCAMD_STUB_LOG"
 command=$1
 [ "$tool" = adb ] && [ "$1" = -s ] && command=$3
 [ "$tool" = scrcpy ] && [ "$is_list" = true ] && command=list
-specific="$OMAVCAM_STUB_DIR/$tool.$command"
+specific="$VCAMD_STUB_DIR/$tool.$command"
 [ -f "$specific.out" ] && cat "$specific.out"
-[ ! -f "$specific.out" ] && [ -f "$OMAVCAM_STUB_DIR/$tool.out" ] && cat "$OMAVCAM_STUB_DIR/$tool.out"
-if [ "$tool" = adb ] && [ "$command" = connect ] && [ -f "$OMAVCAM_STUB_DIR/adb.connect.devices" ]; then
-  cp "$OMAVCAM_STUB_DIR/adb.connect.devices" "$OMAVCAM_STUB_DIR/adb.out"
+[ ! -f "$specific.out" ] && [ -f "$VCAMD_STUB_DIR/$tool.out" ] && cat "$VCAMD_STUB_DIR/$tool.out"
+if [ "$tool" = adb ] && [ "$command" = connect ] && [ -f "$VCAMD_STUB_DIR/adb.connect.devices" ]; then
+  cp "$VCAMD_STUB_DIR/adb.connect.devices" "$VCAMD_STUB_DIR/adb.out"
 fi
-if [ "$tool" = v4l2-ctl ] && [ -f "$OMAVCAM_STUB_DIR/capture.pid" ]; then
-  capture_pid=$(cat "$OMAVCAM_STUB_DIR/capture.pid")
+if [ "$tool" = v4l2-ctl ] && [ -f "$VCAMD_STUB_DIR/capture.pid" ]; then
+  capture_pid=$(cat "$VCAMD_STUB_DIR/capture.pid")
   kill -0 "$capture_pid" 2>/dev/null && printf 'Video Capture\n'
 fi
-fail_once="$OMAVCAM_STUB_DIR/$tool.fail_once"
+fail_once="$VCAMD_STUB_DIR/$tool.fail_once"
 if [ -f "$fail_once" ]; then
   code=$(sed -n '1p' "$fail_once")
   argument=$(sed -n '2p' "$fail_once")
@@ -40,17 +40,17 @@ fi
 # A held stub is a process that keeps running — a capture that is still going.
 # Removing the hold is that process dying without being asked to, and the log
 # line is how a test knows it has actually gone.
-if [ "$is_list" = false ] && [ -f "$OMAVCAM_STUB_DIR/$tool.hold" ]; then
+if [ "$is_list" = false ] && [ -f "$VCAMD_STUB_DIR/$tool.hold" ]; then
   if [ "$tool" = scrcpy ]; then
-    printf '%s\n' "$$" >"$OMAVCAM_STUB_DIR/capture.pid"
-    trap 'rm -f "$OMAVCAM_STUB_DIR/capture.pid"' EXIT
+    printf '%s\n' "$$" >"$VCAMD_STUB_DIR/capture.pid"
+    trap 'rm -f "$VCAMD_STUB_DIR/capture.pid"' EXIT
   fi
-  while [ -f "$OMAVCAM_STUB_DIR/$tool.hold" ]; do sleep 0.05; done
-  printf 'released %s\n' "$tool" >>"$OMAVCAM_STUB_LOG"
+  while [ -f "$VCAMD_STUB_DIR/$tool.hold" ]; do sleep 0.05; done
+  printf 'released %s\n' "$tool" >>"$VCAMD_STUB_LOG"
 fi
 if [ -f "$specific.code" ]; then
   exit "$(cat "$specific.code")"
-elif [ "$is_list" = false ] && [ -f "$OMAVCAM_STUB_DIR/$tool.code" ]; then
-  exit "$(cat "$OMAVCAM_STUB_DIR/$tool.code")"
+elif [ "$is_list" = false ] && [ -f "$VCAMD_STUB_DIR/$tool.code" ]; then
+  exit "$(cat "$VCAMD_STUB_DIR/$tool.code")"
 fi
 exit 0

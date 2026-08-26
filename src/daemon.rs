@@ -29,7 +29,7 @@ use crate::{capture, command, protocol};
 // of lag on a plug is imperceptible. adb's `track-devices` host service if the
 // wakeups ever matter.
 fn poll_interval() -> Duration {
-    let ms: u64 = std::env::var("OMAVCAM_POLL_MS")
+    let ms: u64 = std::env::var("VCAMD_POLL_MS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1000);
@@ -117,7 +117,7 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
     let mut attached = match phones::scan() {
         Ok(attached) => attached,
         Err(e) => {
-            eprintln!("omavcam: could not scan phones: {e}");
+            eprintln!("vcamd: could not scan phones: {e}");
             // adb cannot see anything, so neither can we. Leaving the last
             // list standing would offer a picker full of phones nothing has
             // confirmed are still there.
@@ -177,7 +177,7 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
         attached = match phones::scan() {
             Ok(attached) => attached,
             Err(e) => {
-                eprintln!("omavcam: could not scan phones after connecting: {e}");
+                eprintln!("vcamd: could not scan phones after connecting: {e}");
                 publish_adb_failure(shared);
                 return false;
             }
@@ -334,10 +334,7 @@ fn refresh_connection_locked(shared: &Shared) -> bool {
     };
     if let Some(phone) = confirmed {
         if let Err(error) = ensure_settings_locked(shared, &phone.serial) {
-            eprintln!(
-                "omavcam: could not inspect {}'s cameras: {error}",
-                phone.name
-            );
+            eprintln!("vcamd: could not inspect {}'s cameras: {error}", phone.name);
         }
         let needs_writer = {
             let inner = shared.lock().unwrap();
@@ -511,7 +508,7 @@ fn prepare_reconnect_preview(shared: &Shared) {
         shared.lock().unwrap().preview_position = Some(position);
     }
     if let Err(error) = capture::apply_reconnect_rule(style.rounding, style.border_size, position) {
-        eprintln!("omavcam: could not place the reconnect preview: {error}");
+        eprintln!("vcamd: could not place the reconnect preview: {error}");
     }
 }
 
@@ -547,7 +544,7 @@ fn resume_capture_locked(shared: &Shared, phone: &Phone) {
     };
     if settings::output_size(&settings) != public.size {
         eprintln!(
-            "omavcam: refusing to reconnect {} at a different frame size",
+            "vcamd: refusing to reconnect {} at a different frame size",
             phone.name
         );
         return;
@@ -556,7 +553,7 @@ fn resume_capture_locked(shared: &Shared, phone: &Phone) {
         let hidden = match capture::initial_hidden_position() {
             Ok(hidden) => hidden,
             Err(error) => {
-                eprintln!("omavcam: could not place the reconnect preview offscreen: {error}");
+                eprintln!("vcamd: could not place the reconnect preview offscreen: {error}");
                 return;
             }
         };
@@ -564,7 +561,7 @@ fn resume_capture_locked(shared: &Shared, phone: &Phone) {
             capture::apply_reconnect_rule(style.rounding, style.border_size, Some(hidden))
                 .and_then(|()| capture::hide_reconnect_preview(hidden))
         {
-            eprintln!("omavcam: could not hide the reconnect preview: {error}");
+            eprintln!("vcamd: could not hide the reconnect preview: {error}");
             let _ = capture::apply_reconnect_rule(style.rounding, style.border_size, position);
             return;
         }
@@ -578,10 +575,10 @@ fn resume_capture_locked(shared: &Shared, phone: &Phone) {
                     capture::apply_reconnect_rule(style.rounding, style.border_size, position)
                         .and_then(|()| capture::show_reconnect_preview(position))
                 {
-                    eprintln!("omavcam: could not restore the reconnect preview: {restore_error}");
+                    eprintln!("vcamd: could not restore the reconnect preview: {restore_error}");
                 }
             }
-            eprintln!("omavcam: could not reconnect {}: {error}", phone.name);
+            eprintln!("vcamd: could not reconnect {}: {error}", phone.name);
             let attached = shared.lock().unwrap().state.attached.clone();
             publish_connection(
                 shared,
@@ -793,7 +790,7 @@ fn start_capture(
 fn refusal_reason(connection: &Connection) -> String {
     match connection {
         Connection::Unselected { available } => format!(
-            "{} phones are attached and none is selected; choose one with: omavcam select <serial>",
+            "{} phones are attached and none is selected; choose one with: vcamd select <serial>",
             available.len()
         ),
         Connection::Unauthorised { phone } => format!(
@@ -803,7 +800,7 @@ fn refusal_reason(connection: &Connection) -> String {
         Connection::Connecting { phone } => format!("still connecting to {}", phone.name),
         Connection::Reconnecting { phone } => format!("reconnecting to {}", phone.name),
         Connection::NeedsPairing => {
-            "wireless pairing is needed; run: omavcam pair".to_string()
+            "wireless pairing is needed; run: vcamd pair".to_string()
         }
         Connection::PairingFailed { reason } => pairing_message(reason).to_string(),
         Connection::Unreachable {
@@ -814,7 +811,7 @@ fn refusal_reason(connection: &Connection) -> String {
             phone.name
         ),
         // No phone at all, and nothing to select from.
-        _ => "no phone is attached; plug one in and select it with: omavcam select <serial>"
+        _ => "no phone is attached; plug one in and select it with: vcamd select <serial>"
             .to_string(),
     }
 }
@@ -959,7 +956,7 @@ fn remember_selection(shared: &Shared, serial: String) {
     };
     if let Err(e) = phones::save(&state_dir, &registry) {
         // Worth continuing: the selection holds until the daemon restarts.
-        eprintln!("omavcam: could not remember the selected phone: {e}");
+        eprintln!("vcamd: could not remember the selected phone: {e}");
     }
 }
 
@@ -969,7 +966,7 @@ fn save_registry(shared: &Shared) {
         (inner.state_dir.clone(), inner.registry.clone())
     };
     if let Err(e) = phones::save(&state_dir, &registry) {
-        eprintln!("omavcam: could not remember phones: {e}");
+        eprintln!("vcamd: could not remember phones: {e}");
     }
 }
 
@@ -1133,7 +1130,7 @@ fn pair_phone(
     }
 
     let attached = phones::scan().map_err(|error| {
-        eprintln!("omavcam: could not scan phones after connecting: {error}");
+        eprintln!("vcamd: could not scan phones after connecting: {error}");
         publish_adb_failure(shared);
         ("adb_unavailable", error.to_string())
     })?;
@@ -1231,7 +1228,7 @@ fn update_connect_address(
     }
     let attached = phones::scan().map_err(|error| {
         phones::disconnect_wireless(connect_address);
-        eprintln!("omavcam: could not scan phones after connecting: {error}");
+        eprintln!("vcamd: could not scan phones after connecting: {error}");
         publish_adb_failure(shared);
         ("adb_unavailable", error.to_string())
     })?;
@@ -1693,12 +1690,12 @@ fn listener() -> std::io::Result<UnixListener> {
 }
 
 fn state_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("OMAVCAM_STATE_DIR") {
+    if let Ok(p) = std::env::var("VCAMD_STATE_DIR") {
         return p.into();
     }
     let base = std::env::var("XDG_STATE_HOME")
         .unwrap_or_else(|_| format!("{}/.local/state", std::env::var("HOME").unwrap_or_default()));
-    PathBuf::from(base).join("omavcam")
+    PathBuf::from(base).join("vcamd")
 }
 
 /// Logs go to stderr, which is journald's for a systemd service.
@@ -1729,7 +1726,7 @@ pub fn run() -> std::io::Result<()> {
         let _turn = transition();
         refresh_connection_locked(&shared);
     }
-    eprintln!("omavcam: listening, state dir {}", dir.display());
+    eprintln!("vcamd: listening, state dir {}", dir.display());
 
     // The world changes without anyone asking: a phone is plugged in, or
     // unplugged mid-call, or scrcpy dies. Nothing polls the daemon, so the
@@ -1750,7 +1747,7 @@ pub fn run() -> std::io::Result<()> {
         let shared = Arc::clone(&shared);
         thread::spawn(move || {
             if let Err(e) = serve(&shared, stream) {
-                eprintln!("omavcam: client ended: {e}");
+                eprintln!("vcamd: client ended: {e}");
             }
         });
     }

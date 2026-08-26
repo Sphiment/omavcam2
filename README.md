@@ -1,4 +1,4 @@
-# omavcam
+# vcamd
 
 Turns an Android phone into a webcam on Omarchy. A phone's camera or screen is
 captured over adb, written to a virtual video device, and appears to Meet, Zoom,
@@ -14,7 +14,7 @@ See [CONTEXT.md](CONTEXT.md) for the vocabulary and
 
 Early. What exists today is the daemon, the socket protocol, the test harness
 everything else is built on, wired and wireless connection, and a capture that
-can be started and stopped: `omavcam start` makes the phone's camera appear in
+can be started and stopped: `vcamd start` makes the phone's camera appear in
 Meet's camera list. Lens, resolution, frame rate, aspect ratio and zoom can be
 staged and applied from the CLI. An Arch package — built by CI and installed
 from this repo's releases — installs the engine and configures the module, so
@@ -36,13 +36,13 @@ bar controls. The daemon and CLI work without the wrapper.
 sudo pacman -Syu linux-headers
 
 # 1. The engine, prebuilt by this repo's CI.
-sudo pacman -U https://github.com/Sphiment/omavcam2/releases/latest/download/omavcam-git-x86_64.pkg.tar.zst
+sudo pacman -U https://github.com/Sphiment/vcamd/releases/latest/download/vcamd-git-x86_64.pkg.tar.zst
 
 # 2. Reboot. The package configures the module to load at boot and enables the
 #    daemon's socket for every user, and neither is picked up by a session that
 #    was already running. To skip the reboot, do both by hand instead:
 sudo modprobe v4l2loopback
-systemctl --user daemon-reload && systemctl --user start omavcam.socket
+systemctl --user daemon-reload && systemctl --user start vcamd.socket
 
 # 3. Optional: the Omarchy bar wrapper.
 omarchy plugin add https://github.com/Sphiment/omavcam.git --enable
@@ -54,7 +54,7 @@ step is interactive.
 On the phone, turn on **Developer options** — tap Build number seven times in
 Settings → About phone — and inside it turn on **USB debugging**. Then plug the
 phone in, accept the debugging prompt it shows, and click the widget, or run
-`omavcam start`. The virtual camera appears in Meet, Zoom, OBS and Discord once
+`vcamd start`. The virtual camera appears in Meet, Zoom, OBS and Discord once
 a capture is running, and disappears again when it stops.
 
 If `modprobe v4l2loopback` says there is no such module, the DKMS build did not
@@ -67,15 +67,15 @@ what starts the daemon, and the module is already loaded and labelled.
 That URL always points at the newest release, and pacman pulls in the
 dependencies from its own repositories. To upgrade later, run the same command
 again — the package is not in a pacman repository, so `pacman -Syu` will not
-find a new one for you. `pacman -Q omavcam-git` says which version you have.
+find a new one for you. `pacman -Q vcamd-git` says which version you have.
 
 x86_64 only: that is what the CI builds. On aarch64, build it yourself — see
 below, it is the same PKGBUILD.
 
-The package pulls in everything omavcam needs: `scrcpy`, `android-tools` for
+The package pulls in everything vcamd needs: `scrcpy`, `android-tools` for
 `adb`, `v4l-utils` for `v4l2-ctl`, `v4l2loopback-dkms` for the virtual camera
 itself, and `hyprland` for the `hyprctl` every capture uses to place its
-preview. If one of them goes missing later, `omavcam status` and the
+preview. If one of them goes missing later, `vcamd status` and the
 panel name it and the package that supplies it rather than failing at the
 moment you need the camera.
 
@@ -83,46 +83,46 @@ moment you need the camera.
 
 | Path | What it is |
 |---|---|
-| `/usr/bin/omavcam` | the daemon and the CLI, one binary |
-| `/usr/lib/systemd/user/omavcam.{socket,service}` | socket activation: connecting is what starts the daemon |
-| `/usr/lib/systemd/user/sockets.target.wants/omavcam.socket` | enabled on install, for every user |
-| `/usr/lib/modules-load.d/omavcam.conf` | loads `v4l2loopback` at boot |
-| `/usr/lib/modprobe.d/omavcam.conf` | its parameters: two nodes, labelled, `exclusive_caps=1` |
+| `/usr/bin/vcamd` | the daemon and the CLI, one binary |
+| `/usr/lib/systemd/user/vcamd.{socket,service}` | socket activation: connecting is what starts the daemon |
+| `/usr/lib/systemd/user/sockets.target.wants/vcamd.socket` | enabled on install, for every user |
+| `/usr/lib/modules-load.d/vcamd.conf` | loads `v4l2loopback` at boot |
+| `/usr/lib/modprobe.d/vcamd.conf` | its parameters: two nodes, labelled, `exclusive_caps=1` |
 
 The module configuration is installed rather than applied at runtime because a
 `systemd --user` service has **no capabilities at all** — measured `CapEff:
-0000000000000000`, so `modprobe` fails for it (ADR-0008). Nothing in omavcam
+0000000000000000`, so `modprobe` fails for it (ADR-0008). Nothing in vcamd
 ever calls `modprobe`; a test asserts it.
 
 That means the module is loaded from boot and its nodes always exist. It is
 harmless: with `exclusive_caps=1` a node advertises output only until a
-producer attaches, so an idle omavcam is in nobody's camera list.
+producer attaches, so an idle vcamd is in nobody's camera list.
 
 `exclusive_caps=1` is on **every** node, including the internal one, and it is
 not optional. A node created with `exclusive_caps=0` advertises capture and
 output at once, which makes browsers refuse to list it *and* makes it
 unreadable — the single cause behind three separate failures (ADR-0012). Two
-nodes are created: the public `omavcam`, and `omavcam studio` for Studio's
+nodes are created: the public `vcamd`, and `vcamd studio` for Studio's
 uncropped preview, which must never reach the node applications consume
 (ADR-0009). To change any of this, put your own file in `/etc/modprobe.d` — it
 wins over the package's.
 
-That cuts both ways: if you set omavcam up by hand before there was a package,
+That cuts both ways: if you set vcamd up by hand before there was a package,
 delete the files you wrote or they will keep overriding it, and you will have
 one node where the package creates two.
 
 ```sh
-sudo rm -f /etc/modprobe.d/omavcam.conf /etc/modules-load.d/omavcam.conf
+sudo rm -f /etc/modprobe.d/vcamd.conf /etc/modules-load.d/vcamd.conf
 sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback
 ```
 
 ### Building it yourself
 
-Working on omavcam, or on an architecture the CI does not build:
+Working on vcamd, or on an architecture the CI does not build:
 
 ```sh
-git clone https://github.com/Sphiment/omavcam2.git
-cd omavcam2
+git clone https://github.com/Sphiment/vcamd.git
+cd vcamd
 cargo build --release   # needs rustup: pacman -S rustup && rustup default stable
 ```
 
@@ -137,17 +137,17 @@ cd packaging && makepkg -si
 By hand, which is the same set of files without pacman knowing about them:
 
 ```sh
-sudo install -Dm755 target/release/omavcam /usr/bin/omavcam
-sudo install -Dm644 systemd/omavcam.socket /usr/lib/systemd/user/omavcam.socket
-sudo install -Dm644 systemd/omavcam.service /usr/lib/systemd/user/omavcam.service
-sudo install -Dm644 packaging/omavcam.modules-load.conf /usr/lib/modules-load.d/omavcam.conf
-sudo install -Dm644 packaging/omavcam.modprobe.conf /usr/lib/modprobe.d/omavcam.conf
-systemctl --user enable --now omavcam.socket
+sudo install -Dm755 target/release/vcamd /usr/bin/vcamd
+sudo install -Dm644 systemd/vcamd.socket /usr/lib/systemd/user/vcamd.socket
+sudo install -Dm644 systemd/vcamd.service /usr/lib/systemd/user/vcamd.service
+sudo install -Dm644 packaging/vcamd.modules-load.conf /usr/lib/modules-load.d/vcamd.conf
+sudo install -Dm644 packaging/vcamd.modprobe.conf /usr/lib/modprobe.d/vcamd.conf
+systemctl --user enable --now vcamd.socket
 sudo modprobe v4l2loopback
 ```
 
-The binary has to be at `/usr/bin/omavcam`, because that is the path
-`omavcam.service` names.
+The binary has to be at `/usr/bin/vcamd`, because that is the path
+`vcamd.service` names.
 
 ### Where the package comes from
 
@@ -168,22 +168,22 @@ than whatever the default branch had drifted to.
 ### Uninstall
 
 ```sh
-systemctl --user stop omavcam.socket omavcam.service
-sudo pacman -Rns omavcam-git  # takes the units and the module configuration with it
+systemctl --user stop vcamd.socket vcamd.service
+sudo pacman -Rns vcamd-git  # takes the units and the module configuration with it
 omarchy plugin remove sphiment.omavcam
 ```
 
 `stop`, not `disable`: the socket was enabled by a symlink the package owns, so
-removing the package is what disables it, and `omavcam.service` is never
+removing the package is what disables it, and `vcamd.service` is never
 enabled at all — it exists to be socket-activated.
 
 Removing the package unloads `v4l2loopback` as well, so nothing is left holding
 a camera node. A module something else is actually using has a non-zero
-refcount and is left alone — and nothing omavcam installed will load it again.
+refcount and is left alone — and nothing vcamd installed will load it again.
 
 ## Suggested: make the preview snap where you want it
 
-This is a change **you** make, not one omavcam makes. Hyprland's own snapping
+This is a change **you** make, not one vcamd makes. Hyprland's own snapping
 is what parks the floating preview neatly (ADR-0004), and `respect_gaps` is
 what parks it at `gaps_out` instead of flush against the screen edge:
 
@@ -197,9 +197,9 @@ hl.config({ general = { snap = {
 before the magnet grabs — not the resulting inset. The default of 10 makes them
 nearly impossible to hit; 60–90 feels right.
 
-omavcam will never write this for you. It is a global compositor setting that
+vcamd will never write this for you. It is a global compositor setting that
 changes how *every* floating window behaves, and a plugin has no business
-deciding that. omavcam writes nothing to your Hyprland config at all.
+deciding that. vcamd writes nothing to your Hyprland config at all.
 
 ## Platform scope
 
@@ -211,25 +211,25 @@ Omarchy shell integration itself belongs to the wrapper repository.
 ## Use
 
 ```sh
-omavcam status            # print the daemon's state
-omavcam phones            # list remembered wired and wireless phones
-omavcam select <serial>   # choose which attached phone to use (bare: lists them)
-omavcam pair              # show Android's wireless-pairing steps
-omavcam pair <pair-address> <code> <connect-address>
-omavcam connect <serial> <new-connect-address>  # update a changed connect port
-omavcam forget <serial>   # remove a remembered phone
-omavcam start             # start the capture: the phone's camera becomes a webcam
-omavcam stop              # end it; omavcam disappears from camera lists again
-omavcam set lens 1        # stage one or several camera settings
-omavcam set resolution 1920x1080
-omavcam set frame-rate 24
-omavcam set aspect-ratio 16:9
-omavcam set zoom 2.5
-omavcam set crop 0.1:0.1:0.8:0.8  # normalized x:y:width:height; "none" clears it
-omavcam apply             # replace a capture once, or just persist if stopped
-omavcam discard           # drop every staged change
-omavcam refresh           # re-check adb and the attached phones now
-omavcam daemon            # run the daemon in the foreground (systemd's job, normally)
+vcamd status            # print the daemon's state
+vcamd phones            # list remembered wired and wireless phones
+vcamd select <serial>   # choose which attached phone to use (bare: lists them)
+vcamd pair              # show Android's wireless-pairing steps
+vcamd pair <pair-address> <code> <connect-address>
+vcamd connect <serial> <new-connect-address>  # update a changed connect port
+vcamd forget <serial>   # remove a remembered phone
+vcamd start             # start the capture: the phone's camera becomes a webcam
+vcamd stop              # end it; vcamd disappears from camera lists again
+vcamd set lens 1        # stage one or several camera settings
+vcamd set resolution 1920x1080
+vcamd set frame-rate 24
+vcamd set aspect-ratio 16:9
+vcamd set zoom 2.5
+vcamd set crop 0.1:0.1:0.8:0.8  # normalized x:y:width:height; "none" clears it
+vcamd apply             # replace a capture once, or just persist if stopped
+vcamd discard           # drop every staged change
+vcamd refresh           # re-check adb and the attached phones now
+vcamd daemon            # run the daemon in the foreground (systemd's job, normally)
 ```
 
 Exit codes: `0` the request succeeded, `1` the daemon refused it and said why on
@@ -240,15 +240,15 @@ stderr, `2` the daemon could not be reached at all.
 The daemon asks `adb devices -l` once a second, so plugging a phone in or
 unplugging it is noticed without anyone running a command.
 
-One phone attached is selected automatically. Several and omavcam asks, because
+One phone attached is selected automatically. Several and vcamd asks, because
 the second phone on a desk is usually one that is charging — and it shows up as
 `unauthorized`, so anything taking the first entry from `adb devices` points the
 webcam at a phone in someone's pocket. The choice is remembered in
-`~/.local/state/omavcam/phones.json` and re-made for you whenever that phone is
-attached. When it is *not* attached, omavcam reports no phone rather than
+`~/.local/state/vcamd/phones.json` and re-made for you whenever that phone is
+attached. When it is *not* attached, vcamd reports no phone rather than
 switching to whatever else is plugged in: a webcam should not change rooms
 without being asked. That holds even when the other phone is the only one on
-the desk, so a phone you have never used before is one `omavcam select` away —
+the desk, so a phone you have never used before is one `vcamd select` away —
 run it bare and it lists what is attached.
 
 Changing the selected phone stops a running capture first. A capture is bound
@@ -264,14 +264,14 @@ See [ADR-0007](docs/adr/0007-connection-is-a-phase-not-a-precondition.md).
 
 ## Wireless pairing
 
-Run `omavcam pair` for the steps. On the phone, open Developer options →
+Run `vcamd pair` for the steps. On the phone, open Developer options →
 Wireless debugging, then open **Pair device with pairing code**. That dialog's
 address and six-digit code are for pairing. The address on the main Wireless
-debugging screen is for connecting. The ports are different; omavcam asks for
+debugging screen is for connecting. The ports are different; vcamd asks for
 both so it cannot silently use one for the other:
 
 ```sh
-omavcam pair 192.168.1.40:37123 123456 192.168.1.40:42877
+vcamd pair 192.168.1.40:37123 123456 192.168.1.40:42877
 ```
 
 Pairing is one-time. Later daemon starts use only `adb connect`; no cable and
@@ -279,30 +279,30 @@ no `adb tcpip 5555` are involved. If Android changes the connect port after a
 reboot or Wireless debugging toggle, copy the new main-screen address and run:
 
 ```sh
-omavcam connect <old-connect-address> <new-connect-address>
+vcamd connect <old-connect-address> <new-connect-address>
 ```
 
 Do not pair again. An unreachable paired phone reports that state separately
 and names being on different networks, a sleeping phone, and a changed connect
-port as the things to check. `omavcam phones` lists remembered phones by model;
-`omavcam forget <serial>` removes one.
+port as the things to check. `vcamd phones` lists remembered phones by model;
+`vcamd forget <serial>` removes one.
 
 Logs go to the journal:
 
 ```sh
-journalctl --user -u omavcam.service -f
+journalctl --user -u vcamd.service -f
 ```
 
 ## The capture
 
-`omavcam start` launches one `scrcpy` against the selected phone, writing its
+`vcamd start` launches one `scrcpy` against the selected phone, writing its
 camera straight to the virtual camera with that phone's applied settings.
 Capabilities come from `scrcpy --list-camera-sizes`, so each lens exposes its
 own resolutions, frame rates and zoom bounds rather than a hardcoded menu.
-Settings are remembered per phone. `omavcam stop` ends the capture, and
-omavcam then disappears from every application's camera list — that is the
-point of `exclusive_caps=1`, not a side effect: an idle omavcam showing black
-in Meet's dropdown is what it avoids. The corollary is that omavcam is absent
+Settings are remembered per phone. `vcamd stop` ends the capture, and
+vcamd then disappears from every application's camera list — that is the
+point of `exclusive_caps=1`, not a side effect: an idle vcamd showing black
+in Meet's dropdown is what it avoids. The corollary is that vcamd is absent
 from the list until a capture is running, so it is picked after starting.
 
 Locking the phone mid-capture is fine: the stream is unaffected, and both
@@ -337,9 +337,9 @@ it is deliberately not made unfocusable, because that takes it out of the
 compositor's reach and the drag with it (ADR-0013). They also apply
 the active Omarchy corner radius and border width.
 
-`omavcam start --stay-awake` is refused while the floating preview is part of
+`vcamd start --stay-awake` is refused while the floating preview is part of
 the capture. scrcpy itself forbids `--stay-awake` together with the mandatory
-`--no-control`; omavcam does not weaken input safety or take ownership of
+`--no-control`; vcamd does not weaken input safety or take ownership of
 restoring the phone's power setting.
 
 ## How the pieces talk

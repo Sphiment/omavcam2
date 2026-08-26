@@ -24,7 +24,7 @@ commit rather than from ticket 9.
 A pushed state says what is true now. It does not say which request caused it,
 or whether a request succeeded at all. With push only:
 
-- `omavcam start` has nothing to derive an exit code from;
+- `vcamd start` has nothing to derive an exit code from;
 - Apply cannot report *which* setting the phone rejected;
 - pairing cannot distinguish "failed" from "not yet".
 

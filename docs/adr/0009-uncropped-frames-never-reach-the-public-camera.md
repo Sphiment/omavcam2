@@ -1,7 +1,7 @@
 # Uncropped frames never reach the public virtual camera
 
 > **Mechanism settled by ADR-0010, ADR-0012 and ADR-0013.** Two nodes are
-> packaged: public `omavcam` and `omavcam-studio` — hyphenated, because a
+> packaged: public `vcamd` and `vcamd-studio` — hyphenated, because a
 > `card_label` in a `modprobe.d` file cannot hold a space. The kernel's
 > `next_arg()` strips quotes only when the whole value begins with one, and
 > `param_array_set` then splits on `,` with no quote handling, so a quoted

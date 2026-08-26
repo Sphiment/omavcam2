@@ -1,6 +1,6 @@
 # Builds the Arch package on every push, and attaches it to a release when a
 # version tag is pushed. Users install that built package rather than compiling
-# omavcam themselves — the AUR is closed to new submissions, so this repo's
+# vcamd themselves — the AUR is closed to new submissions, so this repo's
 # releases are the distribution.
 name: package
 
@@ -42,7 +42,7 @@ jobs:
               cp -r /src/packaging /home/builder/build
               chown -R builder /home/builder/build
               su builder -c "git config --global --add safe.directory /src"
-              su builder -c "cd /home/builder/build && OMAVCAM_SOURCE=git+file:///src#commit=$GITHUB_SHA makepkg --noconfirm --nodeps"
+              su builder -c "cd /home/builder/build && VCAMD_SOURCE=git+file:///src#commit=$GITHUB_SHA makepkg --noconfirm --nodeps"
               cp /home/builder/build/*.pkg.tar.zst /out/
               chmod 0644 /out/*.pkg.tar.zst
             '
@@ -52,17 +52,17 @@ jobs:
       # tried before it is a release.
       - uses: actions/upload-artifact@v7
         with:
-          name: omavcam-git-x86_64
+          name: vcamd-git-x86_64
           path: out/*.pkg.tar.zst
 
       # One asset under a fixed name, so the install command in the README is a
       # URL that never changes. The version is inside the package, which is
-      # what `pacman -Q omavcam-git` reads.
+      # what `pacman -Q vcamd-git` reads.
       - name: Publish the release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp out/*.pkg.tar.zst "out/omavcam-git-x86_64.pkg.tar.zst"
+          cp out/*.pkg.tar.zst "out/vcamd-git-x86_64.pkg.tar.zst"
           gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME" || true
-          gh release upload "$GITHUB_REF_NAME" "out/omavcam-git-x86_64.pkg.tar.zst" --clobber
+          gh release upload "$GITHUB_REF_NAME" "out/vcamd-git-x86_64.pkg.tar.zst" --clobber

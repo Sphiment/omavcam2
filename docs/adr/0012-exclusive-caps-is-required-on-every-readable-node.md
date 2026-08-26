@@ -31,7 +31,7 @@ capture device, and readers fail at `STREAMON`.
 Each of these was investigated as its own problem before the common cause was
 found:
 
-- **Browsers would not list omavcam.** Chromium filters devices advertising both
+- **Browsers would not list vcamd.** Chromium filters devices advertising both
   capture and output. With `exclusive_caps=0` the camera vanished from Meet's
   device list entirely — verified on hardware.
 - **PipeWire created a source node but never streamed from it.** It described
@@ -40,7 +40,7 @@ found:
 - **The fan-out relay could not read its own source node.** Same error, same
   cause.
 
-The catch that follows: PipeWire *only* saw omavcam when `exclusive_caps=0`, and
+The catch that follows: PipeWire *only* saw vcamd when `exclusive_caps=0`, and
 that is exactly the setting that makes browsers hide it and readers fail. There
 is no configuration where the PipeWire route works. ADR-0011's PipeWire option
 is closed.

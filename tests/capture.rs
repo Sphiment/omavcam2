@@ -76,7 +76,6 @@ fn start_launches_a_capture_against_the_selected_phone() {
     for setting in [
         "float = true",
         "pin = true",
-        "no_focus = true",
         "no_initial_focus = true",
         "keep_aspect_ratio = true",
         "center = true",
@@ -88,6 +87,13 @@ fn start_launches_a_capture_against_the_selected_phone() {
             argv[rule]
         );
     }
+    // no_focus makes the window unpickable by the compositor, so Super+drag
+    // goes inert and the preview can never be moved (ADR-0013).
+    assert!(
+        !argv[rule].contains("no_focus"),
+        "no_focus is back; the preview is undraggable again: {}",
+        argv[rule]
+    );
     assert!(
         argv.iter().any(|line| {
             line.starts_with("hyprctl eval ") && line.contains("omavcam reconnecting")

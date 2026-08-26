@@ -51,6 +51,24 @@ Window rules by class or title supply rounding and borders.
 `--no-control` is required, or the window forwards clicks and keystrokes to the
 phone.
 
+**`no_focus` is not, and must never be set on it.** It was, and it cost exactly
+the promise made two paragraphs up: a window Hyprland will not focus is a window
+Hyprland will not pick out from under the cursor, so `hl.dsp.window.drag()` finds
+nothing and Super+drag is silently inert. Alt-tab misses it for the same reason.
+Measured on the live preview — `hl.dsp.focus` on it returns `ok` either way, and
+only the property decides whether anything happens:
+
+| `no_focus` | active window after focusing the preview |
+|---|---|
+| `1` | unchanged — the request is dropped |
+| `0` | `omavcam preview` |
+
+The temptation to re-add it is real, because the preview genuinely must not
+steal focus mid-call. **`no_initial_focus` is the property that does that**, and
+it does it without taking the window out of the compositor's reach. The
+transient reconnect window keeps `no_focus` deliberately: nothing reads its
+position, so a drag there would be discarded without trace.
+
 ## Toggling it without disturbing the capture
 
 The preview cannot be closed and reopened, because the window belongs to the

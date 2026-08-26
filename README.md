@@ -337,7 +337,10 @@ known title and `--no-control`, so clicks and typing are never forwarded to the
 phone. The panel hides it by moving that window off-screen and restores its last
 position; scrcpy and the virtual camera keep running throughout. Hyprland rules
 make it floating, pinned on every workspace, aspect-ratio preserving,
-unfocusable, and resistant to the compositor's close shortcut. They also apply
+never focused on its own, and resistant to the compositor's close shortcut.
+It stays draggable with Omarchy's Super+drag, onto a second monitor included;
+it is deliberately not made unfocusable, because that takes it out of the
+compositor's reach and the drag with it (ADR-0013). They also apply
 the active Omarchy corner radius and border width.
 
 `omavcam start --stay-awake` is refused while the floating preview is part of

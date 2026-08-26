@@ -82,25 +82,22 @@ impl Fixture {
                 .args(["-l", self.socket.to_str().unwrap()])
                 .args([
                     format!(
-                        "--setenv=OMAVCAM_STATE_DIR={}",
+                        "--setenv=VCAMD_STATE_DIR={}",
                         self.dir.join("state").display()
                     ),
-                    format!("--setenv=OMAVCAM_STUB_LOG={}", self.log.display()),
-                    format!("--setenv=OMAVCAM_STUB_DIR={}", self.stub_dir.display()),
+                    format!("--setenv=VCAMD_STUB_LOG={}", self.log.display()),
+                    format!("--setenv=VCAMD_STUB_DIR={}", self.stub_dir.display()),
+                    format!("--setenv=VCAMD_V4L2_DIR={}", self.dir.join("sys").display()),
                     format!(
-                        "--setenv=OMAVCAM_V4L2_DIR={}",
-                        self.dir.join("sys").display()
-                    ),
-                    format!(
-                        "--setenv=OMAVCAM_PROC_DIR={}",
+                        "--setenv=VCAMD_PROC_DIR={}",
                         self.dir.join("proc").display()
                     ),
-                    "--setenv=OMAVCAM_STARTUP_MS=500".to_string(),
-                    "--setenv=OMAVCAM_PREVIEW_MS=500".to_string(),
-                    "--setenv=OMAVCAM_COMMAND_MS=100".to_string(),
-                    format!("--setenv=OMAVCAM_POLL_MS={}", self.poll_ms),
+                    "--setenv=VCAMD_STARTUP_MS=500".to_string(),
+                    "--setenv=VCAMD_PREVIEW_MS=500".to_string(),
+                    "--setenv=VCAMD_COMMAND_MS=100".to_string(),
+                    format!("--setenv=VCAMD_POLL_MS={}", self.poll_ms),
                 ])
-                .args([env!("CARGO_BIN_EXE_omavcam"), "daemon"])
+                .args([env!("CARGO_BIN_EXE_vcamd"), "daemon"])
                 .spawn()
                 .unwrap(),
         );
@@ -114,7 +111,7 @@ impl Fixture {
     pub fn new() -> Fixture {
         static N: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "omavcam-test-{}-{}",
+            "vcamd-test-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
@@ -133,7 +130,7 @@ impl Fixture {
         let fixture = Fixture {
             poll_ms: "25".to_string(),
             isolated: false,
-            socket: dir.join("omavcam.sock"),
+            socket: dir.join("vcamd.sock"),
             log: dir.join("argv.log"),
             stub_dir,
             bin_dir,
@@ -160,7 +157,7 @@ impl Fixture {
     /// Start the daemon the way the socket unit would, minus systemd.
     pub fn spawn(&mut self) {
         self.daemon = Some(
-            self.daemon_command(env!("CARGO_BIN_EXE_omavcam"))
+            self.daemon_command(env!("CARGO_BIN_EXE_vcamd"))
                 .arg("daemon")
                 .spawn()
                 .unwrap(),
@@ -180,18 +177,18 @@ impl Fixture {
         let mut command = Command::new(program);
         command
             .env("PATH", self.path())
-            .env("OMAVCAM_SOCKET", &self.socket)
-            .env("OMAVCAM_STATE_DIR", self.dir.join("state"))
-            .env("OMAVCAM_STUB_LOG", &self.log)
-            .env("OMAVCAM_STUB_DIR", &self.stub_dir)
-            .env("OMAVCAM_V4L2_DIR", self.dir.join("sys"))
-            .env("OMAVCAM_PROC_DIR", self.dir.join("proc"))
-            .env("OMAVCAM_STARTUP_MS", "500")
-            .env("OMAVCAM_PREVIEW_MS", "500")
-            .env("OMAVCAM_COMMAND_MS", "100")
+            .env("VCAMD_SOCKET", &self.socket)
+            .env("VCAMD_STATE_DIR", self.dir.join("state"))
+            .env("VCAMD_STUB_LOG", &self.log)
+            .env("VCAMD_STUB_DIR", &self.stub_dir)
+            .env("VCAMD_V4L2_DIR", self.dir.join("sys"))
+            .env("VCAMD_PROC_DIR", self.dir.join("proc"))
+            .env("VCAMD_STARTUP_MS", "500")
+            .env("VCAMD_PREVIEW_MS", "500")
+            .env("VCAMD_COMMAND_MS", "100")
             // The daemon polls adb for attached phones; tests should not wait a
             // real second for a plug or an unplug to be noticed.
-            .env("OMAVCAM_POLL_MS", &self.poll_ms)
+            .env("VCAMD_POLL_MS", &self.poll_ms)
             .process_group(0)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -247,10 +244,10 @@ impl Fixture {
     }
 
     pub fn cli(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_omavcam"))
+        Command::new(env!("CARGO_BIN_EXE_vcamd"))
             .args(args)
             .env("PATH", self.path())
-            .env("OMAVCAM_SOCKET", &self.socket)
+            .env("VCAMD_SOCKET", &self.socket)
             .output()
             .unwrap()
     }
@@ -291,7 +288,7 @@ impl Fixture {
         fs::write(sys.join("video0/name"), "HP Wide Vision HD Camera\n").unwrap();
         for node in nodes {
             fs::create_dir_all(sys.join(node)).unwrap();
-            fs::write(sys.join(node).join("name"), "omavcam\n").unwrap();
+            fs::write(sys.join(node).join("name"), "vcamd\n").unwrap();
         }
     }
 
@@ -404,7 +401,7 @@ impl Fixture {
         fs::write(
             self.stub_dir.join("hyprctl.clients.out"),
             json!([{
-                "title": "omavcam preview",
+                "title": "vcamd preview",
                 "at": at,
                 "size": [640, 360],
                 "floating": true,

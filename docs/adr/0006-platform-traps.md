@@ -22,7 +22,7 @@ hyprctl eval     'hl.config({ general = { gaps_out = 10 } })'
 
 **Quickshell's `Hyprland.dispatch()` is therefore unusable in its documented
 form** — it wraps the argument in `hl.dispatch(...)`, so it must be handed Lua.
-The previous omavcam carried the same workaround in `hypr_dispatch()`.
+The previous vcamd carried the same workaround in `hypr_dispatch()`.
 
 ## `videoInputs[].id` is a QByteArray, not a string
 
@@ -37,7 +37,7 @@ The preview looks perfectly fine while showing the wrong device.
 ## The virtual camera only enumerates while something writes to it
 
 `exclusive_caps=1` means the node advertises capture capability only while a
-capture is running. That is deliberate — it keeps "omavcam" out of every
+capture is running. That is deliberate — it keeps "vcamd" out of every
 application's camera dropdown when idle — but it means the device is absent from
 `MediaDevices.videoInputs` until the stream starts. Binding must be a retry, not
 a one-shot at startup.
@@ -89,13 +89,13 @@ It is the only way to test socket activation without installing unit files, and
 it does **not** pass your environment through. Dumping the child's `env`:
 
 ```
-$ env FOO=bar OMAVCAM_STUB_LOG=/tmp/x systemd-socket-activate -l s.sock -- sh -c 'env'
+$ env FOO=bar VCAMD_STUB_LOG=/tmp/x systemd-socket-activate -l s.sock -- sh -c 'env'
 LISTEN_FDS=1
 LISTEN_PID=1344532
 PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:...
 ```
 
-`PATH` survives. `FOO` and `OMAVCAM_STUB_LOG` are gone. Anything the child needs
+`PATH` survives. `FOO` and `VCAMD_STUB_LOG` are gone. Anything the child needs
 has to be passed explicitly with `--setenv=NAME=VALUE`.
 
 The failure is quiet in exactly the wrong way: with a stub directory on `PATH`

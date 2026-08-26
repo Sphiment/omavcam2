@@ -48,7 +48,7 @@ pub struct State {
     pub capture: Option<Capture>,
     /// Every phone adb can see, whatever phase the connection is in. A fact
     /// about the world rather than a property of one connection state, which
-    /// is what lets a client offer the choice at a moment when omavcam is not
+    /// is what lets a client offer the choice at a moment when vcamd is not
     /// asking for one.
     #[serde(default)]
     pub attached: Vec<Attached>,
@@ -63,14 +63,14 @@ pub struct State {
     /// their live theme with these rather than assuming a one-shot sync held.
     #[serde(default)]
     pub preview_style: PreviewStyle,
-    /// What omavcam needs and cannot find. Empty on a complete install. A
+    /// What vcamd needs and cannot find. Empty on a complete install. A
     /// client renders it as an offer to install; nothing here is something the
     /// daemon can repair itself (ADR-0008).
     #[serde(default)]
     pub missing: Vec<Missing>,
 }
 
-/// One thing omavcam needs and cannot find, with the command that gets it.
+/// One thing vcamd needs and cannot find, with the command that gets it.
 /// "Something is missing" is not something anyone can act on, and neither is a
 /// package name when the package is already installed and merely unloaded —
 /// so the daemon works out the command and every client renders it verbatim.
@@ -178,7 +178,7 @@ pub enum PairingFailure {
 pub enum Connection {
     #[default]
     NoPhone,
-    /// Several attached and none chosen. omavcam does not pick for you.
+    /// Several attached and none chosen. vcamd does not pick for you.
     ///
     /// `available` is the same phones as the state's `attached`, and is kept
     /// only because removing it would break every client that reads it — the
@@ -228,12 +228,12 @@ pub fn error_message(id: &Value, rev: u64, code: &str, message: &str) -> String 
     .to_string()
 }
 
-/// `$OMAVCAM_SOCKET`, else the runtime dir. Tests set the override; the socket
-/// unit's `ListenStream=%t/omavcam.sock` matches the default.
+/// `$VCAMD_SOCKET`, else the runtime dir. Tests set the override; the socket
+/// unit's `ListenStream=%t/vcamd.sock` matches the default.
 pub fn socket_path() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("OMAVCAM_SOCKET") {
+    if let Ok(p) = std::env::var("VCAMD_SOCKET") {
         return p.into();
     }
     let run = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
-    std::path::Path::new(&run).join("omavcam.sock")
+    std::path::Path::new(&run).join("vcamd.sock")
 }

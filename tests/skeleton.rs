@@ -22,7 +22,7 @@ fn a_second_manual_daemon_does_not_steal_the_live_socket() {
     let f = Fixture::start();
 
     let second = f
-        .daemon_command(env!("CARGO_BIN_EXE_omavcam"))
+        .daemon_command(env!("CARGO_BIN_EXE_vcamd"))
         .arg("daemon")
         .output()
         .unwrap();

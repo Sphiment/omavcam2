@@ -18,26 +18,26 @@ use crate::settings::{self, CameraSettings};
 /// The AUR package that ships the daemon and the module configuration. Named
 /// in every message about something being missing, because "install the
 /// package" is not an instruction anyone can follow.
-pub const PACKAGE: &str = "omavcam-git";
+pub const PACKAGE: &str = "vcamd-git";
 
 /// The `card_label` the package's `modprobe.d` file gives the virtual camera,
 /// and the only thing that identifies it. `video_nr` is a request, not a
 /// guarantee — another device can already hold the number (ADR-0008).
-pub const CARD_LABEL: &str = "omavcam";
+pub const CARD_LABEL: &str = "vcamd";
 
 /// scrcpy's window is the preview. Its title is the stable selector shared by
 /// every rule and compositor operation.
-pub const PREVIEW_TITLE: &str = "omavcam preview";
-const RECONNECT_TITLE: &str = "omavcam reconnecting";
+pub const PREVIEW_TITLE: &str = "vcamd preview";
+const RECONNECT_TITLE: &str = "vcamd reconnecting";
 
-const PREVIEW_SELECTOR: &str = "title:^(omavcam preview)$";
-const RECONNECT_SELECTOR: &str = "title:^(omavcam reconnecting)$";
+const PREVIEW_SELECTOR: &str = "title:^(vcamd preview)$";
+const RECONNECT_SELECTOR: &str = "title:^(vcamd reconnecting)$";
 const PREVIEW_WIDTH: u32 = 640;
 
 /// Where the kernel lists video devices. Overridable so tests can hand the
 /// daemon a directory of their own.
 fn v4l2_dir() -> PathBuf {
-    std::env::var("OMAVCAM_V4L2_DIR")
+    std::env::var("VCAMD_V4L2_DIR")
         .unwrap_or_else(|_| "/sys/class/video4linux".into())
         .into()
 }
@@ -108,7 +108,7 @@ pub fn missing() -> Vec<Missing> {
     // One command for both causes, because the daemon cannot tell them apart
     // and the user should not have to: `--needed` is a no-op when the module
     // is already installed, which is the usual case — it was installed with
-    // omavcam and has not been loaded since.
+    // vcamd and has not been loaded since.
     if find_node().is_err() {
         missing.push(Missing {
             what: "the virtual camera".to_string(),
@@ -154,15 +154,15 @@ pub fn set_controls(node: &str) {
     match command::status(process) {
         Ok(status) if status.success() => {}
         Ok(status) => eprintln!(
-            "omavcam: v4l2-ctl refused {node}'s controls ({status}); \
+            "vcamd: v4l2-ctl refused {node}'s controls ({status}); \
              the capture will run without them"
         ),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => eprintln!(
-            "omavcam: could not run v4l2-ctl ({e}); install v4l-utils — \
+            "vcamd: could not run v4l2-ctl ({e}); install v4l-utils — \
              the capture will run without {node}'s controls"
         ),
         Err(e) => eprintln!(
-            "omavcam: could not configure {node} with v4l2-ctl ({e}); \
+            "vcamd: could not configure {node} with v4l2-ctl ({e}); \
              the capture will run without its controls"
         ),
     }
@@ -211,7 +211,7 @@ pub fn spawn(serial: &str, node: &str, settings: &CameraSettings) -> std::io::Re
     // attaches, which is the observable point at which applications can use
     // it. Waiting for that avoids claiming Running during adb/server startup
     // and is the same distinction #9 needs to roll a failed Apply back.
-    let startup_ms = std::env::var("OMAVCAM_STARTUP_MS")
+    let startup_ms = std::env::var("VCAMD_STARTUP_MS")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(5000);
@@ -290,7 +290,7 @@ fn apply_preview_rule_with(
     let placement = placement.map_or(String::new(), |placement| format!("{placement}, "));
     let rule = format!(
         "o.window({{ title = \"^({PREVIEW_TITLE})$\" }}, \
-         {{ name = \"omavcam-preview\", float = true, pin = true, no_dim = true, \
+         {{ name = \"vcamd-preview\", float = true, pin = true, no_dim = true, \
          no_initial_focus = true, keep_aspect_ratio = true, \
          {placement}no_close_for = 2147483647, rounding = {rounding}, border_size = {border_size}, \
          opacity = \"1 1\", tag = \"-default-opacity\" }})"
@@ -309,7 +309,7 @@ pub fn apply_reconnect_rule(
     );
     let rule = format!(
         "o.window({{ title = \"^({RECONNECT_TITLE})$\" }}, \
-         {{ name = \"omavcam-reconnecting\", float = true, pin = true, no_dim = true, \
+         {{ name = \"vcamd-reconnecting\", float = true, pin = true, no_dim = true, \
          no_focus = true, no_initial_focus = true, keep_aspect_ratio = true, \
          {placement}, rounding = {rounding}, border_size = {border_size}, \
          opacity = \"1 1\", tag = \"-default-opacity\" }})"
@@ -403,7 +403,7 @@ fn hidden_position(width: i64) -> std::io::Result<[i64; 2]> {
 }
 
 fn wait_for_preview() -> std::io::Result<()> {
-    let wait_ms = std::env::var("OMAVCAM_PREVIEW_MS")
+    let wait_ms = std::env::var("VCAMD_PREVIEW_MS")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(5000);
@@ -465,7 +465,7 @@ fn hyprctl(args: &[&str]) -> std::io::Result<()> {
 pub fn has_consumer(node: &str, writer_pid: u32) -> std::io::Result<bool> {
     // ponytail: a /proc scan on the rare size-changing Apply; track fd events
     // only if machines with thousands of processes make this measurable.
-    let proc = PathBuf::from(std::env::var("OMAVCAM_PROC_DIR").unwrap_or_else(|_| "/proc".into()));
+    let proc = PathBuf::from(std::env::var("VCAMD_PROC_DIR").unwrap_or_else(|_| "/proc".into()));
     let mut uncertain = false;
     for process in fs::read_dir(proc)? {
         let process = match process {

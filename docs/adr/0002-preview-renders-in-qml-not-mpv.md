@@ -6,7 +6,7 @@
 > needs frames inside our own UI to draw a crop rectangle over them.
 
 Every existing V4L2 preview on this system shells out to mpv — Omarchy's own
-webcam overlay does, and so did the previous omavcam. We render the virtual
+webcam overlay does, and so did the previous vcamd. We render the virtual
 camera directly in a QML `VideoOutput` instead.
 
 ## Why

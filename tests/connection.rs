@@ -1,5 +1,5 @@
 //! Getting a phone attached over USB: what adb reports, which phone is
-//! selected, and the rule that omavcam never guesses between two of them.
+//! selected, and the rule that vcamd never guesses between two of them.
 
 mod common;
 
@@ -297,7 +297,7 @@ fn select_with_no_serial_says_which_phones_are_attached() {
 }
 
 /// The attached phones are a fact about the world, not a property of one
-/// connection state: a client can only offer the choice at a moment omavcam is
+/// connection state: a client can only offer the choice at a moment vcamd is
 /// not asking for one if it is told what is there even while a phone is
 /// selected (#18).
 #[test]

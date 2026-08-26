@@ -41,7 +41,7 @@ boundary from the running system entirely rather than mediating it.
 The module is loaded from boot, so its node always exists. That is harmless
 because of `exclusive_caps=1`: upstream says the device "will announce OUTPUT
 capabilities only… as soon as you have attached a producer to the device, it
-will start announcing CAPTURE capabilities only". An idle omavcam still does not
+will start announcing CAPTURE capabilities only". An idle vcamd still does not
 appear in anyone's camera dropdown.
 
 Changing a module parameter now needs a reload, which needs root. Nothing in the

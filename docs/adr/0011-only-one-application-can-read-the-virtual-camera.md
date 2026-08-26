@@ -29,7 +29,7 @@ Two hypotheses were tested and both were wrong:
 
 - **Buffer starvation.** Reloaded with `max_buffers=16` instead of the default
   2. No change.
-- **Something omavcam configured.** The control test settles it: the **real HP
+- **Something vcamd configured.** The control test settles it: the **real HP
   laptop webcam refuses a second reader too**, with the same error. Nothing
   about the virtual camera is special here.
 
@@ -49,12 +49,12 @@ coexist on a normal desktop at all.
 And here is the connection that makes it our problem after all:
 
 **`exclusive_caps=1` hides the virtual camera from PipeWire.** With a capture
-running, `wpctl status` listed `omavcam` and `omavcam studio` as *Devices* but
+running, `wpctl status` listed `vcamd` and `vcamd studio` as *Devices* but
 created no `Video/Source` node for either — only the HP webcam had one. The node
 advertises output-only capability until a producer attaches, WirePlumber probes
 it while it is idle, sees no capture capability, and never revisits.
 
-So the setting chosen to keep omavcam out of camera dropdowns when idle also
+So the setting chosen to keep vcamd out of camera dropdowns when idle also
 opts us out of the mechanism that would let the preview and a call coexist.
 
 ## The trade
@@ -88,7 +88,7 @@ whoever is already there.
 Early runs appeared to show two clients streaming concurrently. They were all
 wrong: `gst-launch pipewiresrc` **silently falls back to the default camera**
 when its target cannot be resolved, so those tests were measuring the laptop
-webcam. The node ids churn — omavcam moved through `57`, `67`, `73` and serials
+webcam. The node ids churn — vcamd moved through `57`, `67`, `73` and serials
 `79`, `84`, `87` within one session — so any id captured a moment earlier was
 already stale.
 
@@ -104,7 +104,7 @@ the same; a green result without an attribution check means nothing here.
 ## Historical decision: the daemon fans out to a second node
 
 The PipeWire option is **closed**, not merely weak — ADR-0012 explains why. It
-only ever saw omavcam under `exclusive_caps=0`, which is the setting that makes
+only ever saw vcamd under `exclusive_caps=0`, which is the setting that makes
 browsers hide the camera and makes readers fail at `STREAMON`. No configuration
 satisfies both.
 
@@ -117,7 +117,7 @@ window—so this is measurement history rather than the normal pipeline.
 
 Measured on hardware at 720p30, `ours` being scrcpy plus the relay:
 
-| Configuration | omavcam | consumers |
+| Configuration | vcamd | consumers |
 |---|---|---|
 | direct, no relay | 18.2–23.1% | 0.5% |
 | relay → 1 node | 19.8–20.8% | 0.6% |

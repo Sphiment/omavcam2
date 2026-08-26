@@ -1,12 +1,12 @@
 [Unit]
-Description=omavcam daemon socket
-# Installed to /usr/lib/systemd/user by omavcam-git, and enabled there by the
+Description=vcamd daemon socket
+# Installed to /usr/lib/systemd/user by vcamd-git, and enabled there by the
 # sockets.target.wants symlink the package ships — so a fresh install has an
 # engine without anyone running systemctl.
 
 [Socket]
 # %t is XDG_RUNTIME_DIR for a --user unit, which is where the CLI looks.
-ListenStream=%t/omavcam.sock
+ListenStream=%t/vcamd.sock
 SocketMode=0600
 
 [Install]

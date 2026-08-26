@@ -1,39 +1,39 @@
 # Maintainer: Sphiment <sphiment@gmail.com>
 #
-# The engine ships as an Arch package because Omarchy installs plugins by
-# cloning them with no build step, so a compiled binary cannot live inside the
-# plugin. The bar widget still installs with `omarchy plugin add`.
+# The engine ships as an Arch package because it is a compiled daemon with
+# systemd units and kernel-module configuration. The separate Omarchy wrapper
+# installs from https://github.com/Sphiment/omavcamd.
 #
 # CI builds this on every push and attaches it to a release, so nobody has to
-# compile omavcam to use it (.github/workflows/package.yml). The AUR is closed
+# compile vcamd to use it (.github/workflows/package.yml). The AUR is closed
 # to new submissions; this is an AUR-shaped package waiting for it to reopen,
 # which is why it is a `-git` package that clones rather than a source tarball.
 
-pkgname=omavcam-git
+pkgname=vcamd-git
 pkgver=0.1.0.r0.g0000000
 pkgrel=1
 pkgdesc="Turn an Android phone into a webcam on Omarchy: the daemon and CLI behind the bar widget"
 arch=('x86_64' 'aarch64')
-url="https://github.com/Sphiment/omavcam2"
+url="https://github.com/Sphiment/vcamd"
 license=('MIT')
 # scrcpy captures and writes the node, adb finds and talks to the phone,
 # v4l2-ctl sets the node's controls, v4l2loopback is the node itself, and
 # hyprctl applies the preview's window rules before every capture starts.
 depends=('scrcpy' 'android-tools' 'v4l-utils' 'v4l2loopback-dkms' 'hyprland')
 makedepends=('git' 'cargo')
-provides=('omavcam')
-conflicts=('omavcam')
+provides=('vcamd')
+conflicts=('vcamd')
 # No separate -debug package. makepkg's default splits the symbols out into a
 # second package, which leaves the build with two files where the release
 # publishes one, and debug symbols for the engine belong in a local build
 # rather than in everyone's download.
 options=('!debug')
-install=omavcam.install
+install=vcamd.install
 # What makepkg clones. CI overrides it to build the exact commit it checked
 # out, so a released package is the tag and not whatever HEAD had drifted to;
 # left alone it is this repository, which is what a person running makepkg
 # wants.
-source=("$pkgname::${OMAVCAM_SOURCE:-git+https://github.com/Sphiment/omavcam2.git}")
+source=("$pkgname::${VCAMD_SOURCE:-git+https://github.com/Sphiment/vcamd.git}")
 sha256sums=('SKIP')
 
 pkgver() {
@@ -58,22 +58,22 @@ build() {
 
 package() {
   cd "$srcdir/$pkgname"
-  # One binary is both the daemon and the CLI, at the path omavcam.service names.
-  install -Dm755 target/release/omavcam "$pkgdir/usr/bin/omavcam"
+  # One binary is both the daemon and the CLI, at the path vcamd.service names.
+  install -Dm755 target/release/vcamd "$pkgdir/usr/bin/vcamd"
 
-  install -Dm644 systemd/omavcam.socket "$pkgdir/usr/lib/systemd/user/omavcam.socket"
-  install -Dm644 systemd/omavcam.service "$pkgdir/usr/lib/systemd/user/omavcam.service"
+  install -Dm644 systemd/vcamd.socket "$pkgdir/usr/lib/systemd/user/vcamd.socket"
+  install -Dm644 systemd/vcamd.service "$pkgdir/usr/lib/systemd/user/vcamd.service"
   # Enabled by shipping the symlink rather than by running systemctl: a user
   # unit cannot be enabled for a user the package install has never met, and
   # this way installing is the whole of the installation and uninstalling
   # removes it again. Connecting to the socket is what starts the daemon.
   install -d "$pkgdir/usr/lib/systemd/user/sockets.target.wants"
-  ln -s ../omavcam.socket "$pkgdir/usr/lib/systemd/user/sockets.target.wants/omavcam.socket"
+  ln -s ../vcamd.socket "$pkgdir/usr/lib/systemd/user/sockets.target.wants/vcamd.socket"
 
   # The daemon cannot do either of these: a `systemd --user` service has no
   # capabilities at all, measured CapEff 0000000000000000 (ADR-0008).
-  install -Dm644 packaging/omavcam.modules-load.conf "$pkgdir/usr/lib/modules-load.d/omavcam.conf"
-  install -Dm644 packaging/omavcam.modprobe.conf "$pkgdir/usr/lib/modprobe.d/omavcam.conf"
+  install -Dm644 packaging/vcamd.modules-load.conf "$pkgdir/usr/lib/modules-load.d/vcamd.conf"
+  install -Dm644 packaging/vcamd.modprobe.conf "$pkgdir/usr/lib/modprobe.d/vcamd.conf"
 
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"

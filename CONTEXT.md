@@ -1,4 +1,4 @@
-# omavcam
+# vcamd
 
 Turns an Android phone into a webcam on Omarchy. A phone's camera or screen is
 captured over adb, written to a virtual video device, and appears to Meet, Zoom,
@@ -67,7 +67,7 @@ pairing.
 _Avoid_: connection type, method
 
 **Registry**:
-The one file omavcam remembers phones in between runs: which one is selected,
+The one file vcamd remembers phones in between runs: which one is selected,
 and the phones pairing knows about. One registry, not two — a phone is known in
 exactly one place whatever transport it arrived over.
 _Avoid_: store, database, config, known devices

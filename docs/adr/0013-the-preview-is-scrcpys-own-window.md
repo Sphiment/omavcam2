@@ -5,7 +5,7 @@ camera, from a single decode. No relay, no second node, no frame copying.
 
 ```
 scrcpy --video-source=camera --v4l2-sink=/dev/video42 --no-control \
-       --window-title="omavcam preview" ...
+       --window-title="vcamd preview" ...
 ```
 
 ## Why
@@ -40,12 +40,12 @@ concurrently without trouble, and scrcpy stayed up.
 Hyprland reports it as an ordinary floating toplevel:
 
 ```
-title='omavcam preview'  class='scrcpy'  size=[480,270]  floating=True
+title='vcamd preview'  class='scrcpy'  size=[480,270]  floating=True
 ```
 
 So the reasoning in ADR-0003 and ADR-0004 carries over unchanged: alt-tab
 reaches it, Omarchy's Super+drag moves it, the compositor's own snapping applies,
-and the nine anchors work as commands against `title:^(omavcam preview)$`.
+and the nine anchors work as commands against `title:^(vcamd preview)$`.
 Window rules by class or title supply rounding and borders.
 
 `--no-control` is required, or the window forwards clicks and keystrokes to the
@@ -61,7 +61,7 @@ only the property decides whether anything happens:
 | `no_focus` | active window after focusing the preview |
 |---|---|
 | `1` | unchanged — the request is dropped |
-| `0` | `omavcam preview` |
+| `0` | `vcamd preview` |
 
 The temptation to re-add it is real, because the preview genuinely must not
 steal focus mid-call. **`no_initial_focus` is the property that does that**, and

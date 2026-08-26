@@ -291,7 +291,7 @@ fn apply_preview_rule_with(
     let rule = format!(
         "o.window({{ title = \"^({PREVIEW_TITLE})$\" }}, \
          {{ name = \"omavcam-preview\", float = true, pin = true, no_dim = true, \
-         no_focus = true, no_initial_focus = true, keep_aspect_ratio = true, \
+         no_initial_focus = true, keep_aspect_ratio = true, \
          {placement}no_close_for = 2147483647, rounding = {rounding}, border_size = {border_size}, \
          opacity = \"1 1\", tag = \"-default-opacity\" }})"
     );

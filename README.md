@@ -157,7 +157,7 @@ install time. Pushing a `v*` tag publishes that build as a release asset under
 a fixed name, which is what the install command above downloads.
 
 ```sh
-git tag v0.1.0 && git push origin v0.1.0   # cuts a release
+git tag v0.2.0 && git push origin v0.2.0   # cuts a release
 ```
 
 It is not an AUR package: the AUR is closed to new submissions at the moment.
